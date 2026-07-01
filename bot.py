@@ -115,17 +115,29 @@ def add_months(dt: date, months: int) -> date:
     return dt.replace(year=year, month=month, day=day)
 
 
+def effective_days(days: list, year: int, month: int) -> set:
+    """Map each target day to the actual day it fires in a given month.
+
+    Days beyond the month's length (e.g. 31 in February) are clamped to the
+    last day of that month so the reminder is never skipped.
+    """
+    last = calendar.monthrange(year, month)[1]
+    return {min(d, last) for d in days}
+
+
+def day_fires_today(days: list, today: date) -> bool:
+    return today.day in effective_days(days, today.year, today.month)
+
+
 def next_reminder_date(days: list, after: date):
-    for d in sorted(days):
+    eff = effective_days(days, after.year, after.month)
+    for d in sorted(eff):
         if d > after.day:
-            max_day = calendar.monthrange(after.year, after.month)[1]
-            if d <= max_day:
-                return after.replace(day=d)
+            return after.replace(day=d)
     nm = add_months(after, 1)
-    for d in sorted(days):
-        max_day = calendar.monthrange(nm.year, nm.month)[1]
-        if d <= max_day:
-            return nm.replace(day=d)
+    nm_eff = effective_days(days, nm.year, nm.month)
+    if nm_eff:
+        return nm.replace(day=min(nm_eff))
     return None
 
 
@@ -473,8 +485,17 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         context.chat_data["pending_days"] = days
         context.chat_data.pop(AWAIT, None)
+        note = ""
+        if any(d > 28 for d in days):
+            note = (
+                "\n\nNote: some months are shorter, so for day(s) "
+                f"{', '.join(str(d) for d in days if d > 28)} I'll send on the "
+                "last day of the month when that date doesn't exist "
+                "(e.g. day 31 → 28 Feb). No reminder is ever skipped."
+            )
         await update.message.reply_text(
-            f"Days noted: {', '.join(str(d) for d in days)}\n\nWhat time should I send the reminder?",
+            f"Days noted: {', '.join(str(d) for d in days)}{note}"
+            "\n\nWhat time should I send the reminder?",
             reply_markup=_time_keyboard("setup:back_days"),
         )
 
@@ -564,7 +585,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             if end_date_str and today > date.fromisoformat(end_date_str):
                 continue
-            if today.day not in days:
+            if not day_fires_today(days, today):
                 continue
 
             is_final = False
@@ -577,7 +598,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             send_text = message
             if is_final:
                 send_text += (
-                   "\n\nThis is the final reminder for this alert. "
+                    "\n\nThis is the final reminder for this alert. "
                     "Use /setup to continue or create a new one."
                 )
 
