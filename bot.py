@@ -33,11 +33,10 @@ CB_BACK_MENU  = "setup:back_menu"
 
 # Chat state keys
 AWAIT = "awaiting"
-AWAIT_DAYS_NEW   = "days_new"
-AWAIT_MONTHS_NEW = "months_new"
-AWAIT_MSG_NEW    = "msg_new"
-AWAIT_DAYS_EDIT  = "days_edit"
-AWAIT_MSG_EDIT   = "msg_edit"
+AWAIT_DAYS_NEW  = "days_new"
+AWAIT_MSG_NEW   = "msg_new"
+AWAIT_DAYS_EDIT = "days_edit"
+AWAIT_MSG_EDIT  = "msg_edit"
 
 HOUR_LABELS = {9: "9:00 AM", 12: "12:00 PM", 21: "9:00 PM"}
 
@@ -141,18 +140,18 @@ def _time_label(r: dict) -> str:
 def _reminder_label(r: dict) -> str:
     days_str = " & ".join(str(d) for d in sorted(r["days"]))
     msg = r["message"]
-    preview = (msg[:18] + "\u2026") if len(msg) > 18 else msg
-    prefix = "\u23f8 " if r.get("paused") else ""
-    return f"{prefix}Day {days_str}  \u00b7  {_time_label(r)}  \u00b7  {preview}"
+    preview = (msg[:18] + "…") if len(msg) > 18 else msg
+    prefix = "⏸ " if r.get("paused") else ""
+    return f"{prefix}Day {days_str}  ·  {_time_label(r)}  ·  {preview}"
 
 
 def _menu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     reminders = get_reminders(chat_id)
     all_paused = bool(reminders) and all(r.get("paused") for r in reminders)
-    pause_label = "\u25b6\ufe0f Resume all" if all_paused else "\u23f8 Pause all"
+    pause_label = "▶️ Resume all" if all_paused else "⏸ Pause all"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("\u2795 Create new alert", callback_data=CB_NEW)],
-        [InlineKeyboardButton("\u270f\ufe0f Change reminders", callback_data=CB_CHANGE)],
+        [InlineKeyboardButton("➕ Create new alert", callback_data=CB_NEW)],
+        [InlineKeyboardButton("✏️ Change reminders", callback_data=CB_CHANGE)],
         [InlineKeyboardButton(pause_label, callback_data=CB_PAUSE_ALL)],
     ])
 
@@ -165,18 +164,27 @@ def _reminder_list_keyboard(chat_id: int):
         [InlineKeyboardButton(_reminder_label(r), callback_data=f"rem:{r['id']}:view")]
         for r in reminders
     ]
-    buttons.append([InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)])
+    buttons.append([InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)])
     return InlineKeyboardMarkup(buttons), "Select a reminder to edit:"
+
+
+def _months_keyboard(back_cb: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(str(m), callback_data=f"setup:months:{m}") for m in range(r, r + 3)]
+        for r in range(1, 12, 3)
+    ]
+    rows.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
 
 
 def _time_keyboard(back_cb: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("\U0001f305 9:00 AM",  callback_data="setup:time:9"),
-            InlineKeyboardButton("\u2600\ufe0f 12:00 PM", callback_data="setup:time:12"),
-            InlineKeyboardButton("\U0001f319 9:00 PM",  callback_data="setup:time:21"),
+            InlineKeyboardButton("🌅 9:00 AM",  callback_data=f"setup:time:9"),
+            InlineKeyboardButton("☀️ 12:00 PM", callback_data=f"setup:time:12"),
+            InlineKeyboardButton("🌙 9:00 PM",  callback_data=f"setup:time:21"),
         ],
-        [InlineKeyboardButton("\u2190 Back", callback_data=back_cb)],
+        [InlineKeyboardButton("← Back", callback_data=back_cb)],
     ])
 
 
@@ -185,8 +193,8 @@ def _reminder_detail(r: dict):
     days_str = ", ".join(str(d) for d in sorted(r["days"]))
     end = r.get("end_date")
     end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "no end date"
-    status_str = "\u23f8 Paused" if r.get("paused") else "\u25b6\ufe0f Active"
-    toggle_label = "\u25b6\ufe0f Resume" if r.get("paused") else "\u23f8 Pause"
+    status_str = "⏸ Paused" if r.get("paused") else "▶️ Active"
+    toggle_label = "▶️ Resume" if r.get("paused") else "⏸ Pause"
     text = (
         f"Days: {days_str}\n"
         f"Time: {_time_label(r)} SGT\n"
@@ -195,12 +203,12 @@ def _reminder_detail(r: dict):
         f"Status: {status_str}"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("\U0001f4c5 Change days",    callback_data=f"rem:{rid}:change_days")],
-        [InlineKeyboardButton("\U0001f550 Change time",    callback_data=f"rem:{rid}:change_time")],
-        [InlineKeyboardButton("\U0001f4ac Change message", callback_data=f"rem:{rid}:change_msg")],
-        [InlineKeyboardButton(toggle_label,                callback_data=f"rem:{rid}:toggle")],
-        [InlineKeyboardButton("\U0001f5d1 Delete",         callback_data=f"rem:{rid}:delete")],
-        [InlineKeyboardButton("\u2190 Back",               callback_data=CB_CHANGE)],
+        [InlineKeyboardButton("📅 Change days",    callback_data=f"rem:{rid}:change_days")],
+        [InlineKeyboardButton("🕐 Change time",    callback_data=f"rem:{rid}:change_time")],
+        [InlineKeyboardButton("💬 Change message", callback_data=f"rem:{rid}:change_msg")],
+        [InlineKeyboardButton(toggle_label,        callback_data=f"rem:{rid}:toggle")],
+        [InlineKeyboardButton("🗑 Delete",         callback_data=f"rem:{rid}:delete")],
+        [InlineKeyboardButton("← Back",            callback_data=CB_CHANGE)],
     ])
     return text, keyboard
 
@@ -257,15 +265,15 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
             "Which days of the month should I send reminders?\n"
-            "Reply with day numbers separated by spaces \u2014 e.g. 1 15 28",
+            "Reply with day numbers separated by spaces — e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]]
+                [[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]]
             ),
         )
 
     elif data == CB_CHANGE:
         keyboard, text = _reminder_list_keyboard(chat_id)
-        back = InlineKeyboardMarkup([[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]])
+        back = InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]])
         await query.edit_message_text(text, reply_markup=keyboard or back)
 
     elif data == CB_PAUSE_ALL:
@@ -273,7 +281,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not reminders:
             await query.edit_message_text(
                 "No reminders to pause. Use 'Create new alert' first.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]]),
             )
             return
         all_paused = all(r.get("paused") for r in reminders)
@@ -296,13 +304,14 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
             "Which days of the month should I send reminders?\n"
-            "Reply with day numbers separated by spaces \u2014 e.g. 1 15 28",
+            "Reply with day numbers separated by spaces — e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]]
+                [[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]]
             ),
         )
 
     elif data == "setup:back_time":
+        # Back to time picker (days already stored)
         days = context.chat_data.get("pending_days", [])
         context.chat_data.pop(AWAIT, None)
         await query.edit_message_text(
@@ -311,29 +320,38 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
     elif data == "setup:back_months":
-        context.chat_data[AWAIT] = AWAIT_MONTHS_NEW
+        context.chat_data.pop(AWAIT, None)
         days = context.chat_data.get("pending_days", [])
         hour = context.chat_data.get("pending_hour", 12)
         await query.edit_message_text(
             f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How many months should this reminder persist?\n"
-            "Reply with a number \u2014 e.g. 3",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_time")]]
-            ),
+            "How many months should this reminder persist?",
+            reply_markup=_months_keyboard("setup:back_time"),
         )
 
     elif data.startswith("setup:time:"):
         hour = int(data.split(":")[2])
         context.chat_data["pending_hour"] = hour
-        context.chat_data[AWAIT] = AWAIT_MONTHS_NEW
         days = context.chat_data.get("pending_days", [])
         await query.edit_message_text(
             f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How many months should this reminder persist?\n"
-            "Reply with a number \u2014 e.g. 3",
+            "How many months should this reminder persist?",
+            reply_markup=_months_keyboard("setup:back_time"),
+        )
+
+    elif data.startswith("setup:months:"):
+        months = int(data.split(":")[2])
+        end_date = add_months(datetime.now(SGT).date(), months)
+        context.chat_data["pending_months"] = months
+        context.chat_data["pending_end_date"] = end_date.isoformat()
+        context.chat_data[AWAIT] = AWAIT_MSG_NEW
+        days = context.chat_data.get("pending_days", [])
+        hour = context.chat_data.get("pending_hour", 12)
+        await query.edit_message_text(
+            f"Got it — {months} month(s), running until {end_date.strftime('%d %b %Y')}.\n\n"
+            "What message should I send to this group on those days?",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_time")]]
+                [[InlineKeyboardButton("← Back", callback_data="setup:back_months")]]
             ),
         )
 
@@ -367,21 +385,22 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.chat_data["editing_id"] = rid
         days_str = ", ".join(str(d) for d in sorted(r["days"]))
         await query.edit_message_text(
-            f"Current days: {days_str}\n\nReply with the new days \u2014 e.g. 1 15 28",
+            f"Current days: {days_str}\n\nReply with the new days — e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data=f"rem:{rid}:view")]]
+                [[InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")]]
             ),
         )
 
     elif action == "change_time":
+        # Show 3 time buttons; selecting one uses rem:{id}:set_time:{hour}
         current = _time_label(r)
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("\U0001f305 9:00 AM",  callback_data=f"rem:{rid}:set_time:9"),
-                InlineKeyboardButton("\u2600\ufe0f 12:00 PM", callback_data=f"rem:{rid}:set_time:12"),
-                InlineKeyboardButton("\U0001f319 9:00 PM",  callback_data=f"rem:{rid}:set_time:21"),
+                InlineKeyboardButton("🌅 9:00 AM",  callback_data=f"rem:{rid}:set_time:9"),
+                InlineKeyboardButton("☀️ 12:00 PM", callback_data=f"rem:{rid}:set_time:12"),
+                InlineKeyboardButton("🌙 9:00 PM",  callback_data=f"rem:{rid}:set_time:21"),
             ],
-            [InlineKeyboardButton("\u2190 Back", callback_data=f"rem:{rid}:view")],
+            [InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")],
         ])
         await query.edit_message_text(
             f"Current time: {current} SGT\n\nChoose a new send time:",
@@ -401,7 +420,7 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             f"Current message:\n{r['message']}\n\nReply with the new message.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data=f"rem:{rid}:view")]]
+                [[InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")]]
             ),
         )
 
@@ -414,19 +433,19 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     elif action == "delete":
         days_str = ", ".join(str(d) for d in sorted(r["days"]))
-        preview = (r["message"][:30] + "\u2026") if len(r["message"]) > 30 else r["message"]
+        preview = (r["message"][:30] + "…") if len(r["message"]) > 30 else r["message"]
         await query.edit_message_text(
             f"Delete this reminder?\n\nDays: {days_str}\nTime: {_time_label(r)} SGT\nMessage: {preview}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("\U0001f5d1 Yes, delete", callback_data=f"rem:{rid}:confirm_delete")],
-                [InlineKeyboardButton("\u2190 Keep it",         callback_data=f"rem:{rid}:view")],
+                [InlineKeyboardButton("🗑 Yes, delete", callback_data=f"rem:{rid}:confirm_delete")],
+                [InlineKeyboardButton("← Keep it",     callback_data=f"rem:{rid}:view")],
             ]),
         )
 
     elif action == "confirm_delete":
         delete_reminder(chat_id, rid)
         keyboard, text = _reminder_list_keyboard(chat_id)
-        back = InlineKeyboardMarkup([[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]])
+        back = InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]])
         await query.edit_message_text(
             "Reminder deleted.\n\n" + text,
             reply_markup=keyboard or back,
@@ -457,26 +476,6 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(
             f"Days noted: {', '.join(str(d) for d in days)}\n\nWhat time should I send the reminder?",
             reply_markup=_time_keyboard("setup:back_days"),
-        )
-
-    elif awaiting == AWAIT_MONTHS_NEW:
-        try:
-            months = int(text)
-            if months < 1:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("Please send a valid number of months, e.g. 3")
-            return
-        end_date = add_months(datetime.now(SGT).date(), months)
-        context.chat_data["pending_months"] = months
-        context.chat_data["pending_end_date"] = end_date.isoformat()
-        context.chat_data[AWAIT] = AWAIT_MSG_NEW
-        await update.message.reply_text(
-            f"Got it \u2014 {months} month(s), running until {end_date.strftime('%d %b %Y')}.\n\n"
-            "What message should I send to this group on those days?",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_months")]]
-            ),
         )
 
     elif awaiting == AWAIT_MSG_NEW:
@@ -531,17 +530,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         days_str = ", ".join(str(d) for d in sorted(r["days"]))
         end = r.get("end_date")
         end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "no end date"
-        status_str = "\u23f8 Paused" if r.get("paused") else "\u25b6\ufe0f Active"
+        status_str = "⏸ Paused" if r.get("paused") else "▶️ Active"
         lines.append(
             f"{i}. {status_str}\n"
-            f"   Days: {days_str} \u00b7 Time: {_time_label(r)} SGT \u00b7 Until: {end_str}\n"
+            f"   Days: {days_str} · Time: {_time_label(r)} SGT · Until: {end_str}\n"
             f"   Message: {r['message']}"
         )
     await update.message.reply_text("\n\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
-# Scheduled job -- fires at 9 AM, 12 PM, and 9 PM SGT
+# Scheduled job — fires at 9 AM, 12 PM, and 9 PM SGT
 # Each invocation only sends reminders matching its hour.
 # ---------------------------------------------------------------------------
 
@@ -578,7 +577,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             send_text = message
             if is_final:
                 send_text += (
-                    "\n\nThis is the final reminder for this alert. "
+                   "\n\nThis is the final reminder for this alert. "
                     "Use /setup to continue or create a new one."
                 )
 
