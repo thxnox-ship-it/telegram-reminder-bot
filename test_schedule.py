@@ -43,7 +43,7 @@ def _save(cfg):
 
 bot.save_config = _save
 
-# ── clock control ─────────────────────────────────────────────────────────
+# ── clock control ──────────────────────────────────────────────────────────
 _NOW = {"dt": None}
 _real_dt = bot.datetime
 
