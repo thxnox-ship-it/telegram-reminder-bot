@@ -33,11 +33,13 @@ CB_BACK_MENU  = "setup:back_menu"
 
 # Chat state keys
 AWAIT = "awaiting"
-AWAIT_DAYS_NEW    = "days_new"
-AWAIT_MONTHS_NEW  = "months_new"
-AWAIT_MSG_NEW     = "msg_new"
-AWAIT_DAYS_EDIT   = "days_edit"
-AWAIT_MSG_EDIT    = "msg_edit"
+AWAIT_DAYS_NEW   = "days_new"
+AWAIT_MONTHS_NEW = "months_new"
+AWAIT_MSG_NEW    = "msg_new"
+AWAIT_DAYS_EDIT  = "days_edit"
+AWAIT_MSG_EDIT   = "msg_edit"
+
+HOUR_LABELS = {9: "9:00 AM", 12: "12:00 PM", 21: "9:00 PM"}
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +72,13 @@ def _save_reminders(chat_id: int, reminders: list) -> None:
     save_config(config)
 
 
-def add_reminder(chat_id: int, days: list, message: str, end_date: str) -> int:
+def add_reminder(chat_id: int, days: list, hour: int, message: str, end_date: str) -> int:
     reminders = get_reminders(chat_id)
     new_id = max((r["id"] for r in reminders), default=0) + 1
     reminders.append({
         "id": new_id,
         "days": days,
+        "hour": hour,
         "message": message,
         "paused": False,
         "end_date": end_date,
@@ -131,28 +134,16 @@ def next_reminder_date(days: list, after: date):
 # UI helpers
 # ---------------------------------------------------------------------------
 
+def _time_label(r: dict) -> str:
+    return HOUR_LABELS.get(r.get("hour", 12), "12:00 PM")
+
+
 def _reminder_label(r: dict) -> str:
     days_str = " & ".join(str(d) for d in sorted(r["days"]))
     msg = r["message"]
-    preview = (msg[:22] + "\u2026") if len(msg) > 22 else msg
+    preview = (msg[:18] + "\u2026") if len(msg) > 18 else msg
     prefix = "\u23f8 " if r.get("paused") else ""
-    return f"{prefix}Day {days_str}  \u00b7  {preview}"
-
-
-async def is_admin(update, context):
-    chat = update.effective_chat
-    user = update.effective_user
-    if chat.type == "private":
-        return True
-    member = await context.bot.get_chat_member(chat.id, user.id)
-    return member.status in ("administrator", "creator")
-
-
-async def require_admin(update, context):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Only group admins can use this command.")
-        return False
-    return True
+    return f"{prefix}Day {days_str}  \u00b7  {_time_label(r)}  \u00b7  {preview}"
 
 
 def _menu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
@@ -178,6 +169,17 @@ def _reminder_list_keyboard(chat_id: int):
     return InlineKeyboardMarkup(buttons), "Select a reminder to edit:"
 
 
+def _time_keyboard(back_cb: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("\U0001f305 9:00 AM",  callback_data="setup:time:9"),
+            InlineKeyboardButton("\u2600\ufe0f 12:00 PM", callback_data="setup:time:12"),
+            InlineKeyboardButton("\U0001f319 9:00 PM",  callback_data="setup:time:21"),
+        ],
+        [InlineKeyboardButton("\u2190 Back", callback_data=back_cb)],
+    ])
+
+
 def _reminder_detail(r: dict):
     rid = r["id"]
     days_str = ", ".join(str(d) for d in sorted(r["days"]))
@@ -187,12 +189,14 @@ def _reminder_detail(r: dict):
     toggle_label = "\u25b6\ufe0f Resume" if r.get("paused") else "\u23f8 Pause"
     text = (
         f"Days: {days_str}\n"
+        f"Time: {_time_label(r)} SGT\n"
         f"Message: {r['message']}\n"
         f"Until: {end_str}\n"
         f"Status: {status_str}"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("\U0001f4c5 Change days",    callback_data=f"rem:{rid}:change_days")],
+        [InlineKeyboardButton("\U0001f550 Change time",    callback_data=f"rem:{rid}:change_time")],
         [InlineKeyboardButton("\U0001f4ac Change message", callback_data=f"rem:{rid}:change_msg")],
         [InlineKeyboardButton(toggle_label,                callback_data=f"rem:{rid}:toggle")],
         [InlineKeyboardButton("\U0001f5d1 Delete",         callback_data=f"rem:{rid}:delete")],
@@ -202,10 +206,30 @@ def _reminder_detail(r: dict):
 
 
 # ---------------------------------------------------------------------------
+# Admin guard
+# ---------------------------------------------------------------------------
+
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat.type == "private":
+        return True
+    member = await context.bot.get_chat_member(chat.id, user.id)
+    return member.status in ("administrator", "creator")
+
+
+async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not await is_admin(update, context):
+        await update.message.reply_text("Only group admins can use this command.")
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # /setup
 # ---------------------------------------------------------------------------
 
-async def setup_start(update, context):
+async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update, context):
         return
     context.chat_data.pop(AWAIT, None)
@@ -220,7 +244,7 @@ async def setup_start(update, context):
 # Top-level callback handler (setup:*)
 # ---------------------------------------------------------------------------
 
-async def setup_callback(update, context):
+async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     if not await is_admin(update, context):
@@ -232,7 +256,8 @@ async def setup_callback(update, context):
     if data == CB_NEW:
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
-            "Which days of the month should I send reminders?\nReply with day numbers separated by spaces \u2014 e.g. 1 15 28",
+            "Which days of the month should I send reminders?\n"
+            "Reply with day numbers separated by spaces \u2014 e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]]
             ),
@@ -270,19 +295,45 @@ async def setup_callback(update, context):
     elif data == "setup:back_days":
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
-            "Which days of the month should I send reminders?\nReply with day numbers separated by spaces \u2014 e.g. 1 15 28",
+            "Which days of the month should I send reminders?\n"
+            "Reply with day numbers separated by spaces \u2014 e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("\u2190 Back", callback_data=CB_BACK_MENU)]]
             ),
         )
 
+    elif data == "setup:back_time":
+        days = context.chat_data.get("pending_days", [])
+        context.chat_data.pop(AWAIT, None)
+        await query.edit_message_text(
+            f"Days noted: {', '.join(str(d) for d in days)}\n\nWhat time should I send the reminder?",
+            reply_markup=_time_keyboard("setup:back_days"),
+        )
+
     elif data == "setup:back_months":
         context.chat_data[AWAIT] = AWAIT_MONTHS_NEW
         days = context.chat_data.get("pending_days", [])
+        hour = context.chat_data.get("pending_hour", 12)
         await query.edit_message_text(
-            f"Days noted: {', '.join(str(d) for d in days)}\n\nHow many months should this reminder persist?\nReply with a number \u2014 e.g. 3",
+            f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
+            "How many months should this reminder persist?\n"
+            "Reply with a number \u2014 e.g. 3",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_days")]]
+                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_time")]]
+            ),
+        )
+
+    elif data.startswith("setup:time:"):
+        hour = int(data.split(":")[2])
+        context.chat_data["pending_hour"] = hour
+        context.chat_data[AWAIT] = AWAIT_MONTHS_NEW
+        days = context.chat_data.get("pending_days", [])
+        await query.edit_message_text(
+            f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
+            "How many months should this reminder persist?\n"
+            "Reply with a number \u2014 e.g. 3",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_time")]]
             ),
         )
 
@@ -291,7 +342,7 @@ async def setup_callback(update, context):
 # Per-reminder callback handler (rem:{id}:{action})
 # ---------------------------------------------------------------------------
 
-async def reminder_callback(update, context):
+async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     if not await is_admin(update, context):
@@ -299,7 +350,8 @@ async def reminder_callback(update, context):
         return
     chat_id = query.message.chat.id
 
-    _, rid_str, action = query.data.split(":", 2)
+    parts = query.data.split(":", 2)
+    _, rid_str, action = parts
     rid = int(rid_str)
     r = get_reminder_by_id(chat_id, rid)
     if r is None:
@@ -320,6 +372,28 @@ async def reminder_callback(update, context):
                 [[InlineKeyboardButton("\u2190 Back", callback_data=f"rem:{rid}:view")]]
             ),
         )
+
+    elif action == "change_time":
+        current = _time_label(r)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("\U0001f305 9:00 AM",  callback_data=f"rem:{rid}:set_time:9"),
+                InlineKeyboardButton("\u2600\ufe0f 12:00 PM", callback_data=f"rem:{rid}:set_time:12"),
+                InlineKeyboardButton("\U0001f319 9:00 PM",  callback_data=f"rem:{rid}:set_time:21"),
+            ],
+            [InlineKeyboardButton("\u2190 Back", callback_data=f"rem:{rid}:view")],
+        ])
+        await query.edit_message_text(
+            f"Current time: {current} SGT\n\nChoose a new send time:",
+            reply_markup=keyboard,
+        )
+
+    elif action.startswith("set_time:"):
+        new_hour = int(action.split(":")[1])
+        update_reminder(chat_id, rid, hour=new_hour)
+        r["hour"] = new_hour
+        text, keyboard = _reminder_detail(r)
+        await query.edit_message_text(text, reply_markup=keyboard)
 
     elif action == "change_msg":
         context.chat_data[AWAIT] = AWAIT_MSG_EDIT
@@ -342,10 +416,10 @@ async def reminder_callback(update, context):
         days_str = ", ".join(str(d) for d in sorted(r["days"]))
         preview = (r["message"][:30] + "\u2026") if len(r["message"]) > 30 else r["message"]
         await query.edit_message_text(
-            f"Delete this reminder?\n\nDays: {days_str}\nMessage: {preview}",
+            f"Delete this reminder?\n\nDays: {days_str}\nTime: {_time_label(r)} SGT\nMessage: {preview}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("\U0001f5d1 Yes, delete", callback_data=f"rem:{rid}:confirm_delete")],
-                [InlineKeyboardButton("\u2190 Keep it",        callback_data=f"rem:{rid}:view")],
+                [InlineKeyboardButton("\u2190 Keep it",         callback_data=f"rem:{rid}:view")],
             ]),
         )
 
@@ -363,7 +437,7 @@ async def reminder_callback(update, context):
 # Text reply handler
 # ---------------------------------------------------------------------------
 
-async def handle_reply(update, context):
+async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     awaiting = context.chat_data.get(AWAIT)
     if not awaiting:
         return
@@ -379,12 +453,10 @@ async def handle_reply(update, context):
             await update.message.reply_text("Please send valid day numbers between 1 and 31.")
             return
         context.chat_data["pending_days"] = days
-        context.chat_data[AWAIT] = AWAIT_MONTHS_NEW
+        context.chat_data.pop(AWAIT, None)
         await update.message.reply_text(
-            f"Days noted: {', '.join(str(d) for d in days)}\n\nHow many months should this reminder persist?\nReply with a number \u2014 e.g. 3",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_days")]]
-            ),
+            f"Days noted: {', '.join(str(d) for d in days)}\n\nWhat time should I send the reminder?",
+            reply_markup=_time_keyboard("setup:back_days"),
         )
 
     elif awaiting == AWAIT_MONTHS_NEW:
@@ -400,7 +472,8 @@ async def handle_reply(update, context):
         context.chat_data["pending_end_date"] = end_date.isoformat()
         context.chat_data[AWAIT] = AWAIT_MSG_NEW
         await update.message.reply_text(
-            f"Got it \u2014 {months} month(s), running until {end_date.strftime('%d %b %Y')}.\n\nWhat message should I send to this group on those days?",
+            f"Got it \u2014 {months} month(s), running until {end_date.strftime('%d %b %Y')}.\n\n"
+            "What message should I send to this group on those days?",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("\u2190 Back", callback_data="setup:back_months")]]
             ),
@@ -408,17 +481,18 @@ async def handle_reply(update, context):
 
     elif awaiting == AWAIT_MSG_NEW:
         days = context.chat_data.pop("pending_days", [])
+        hour = context.chat_data.pop("pending_hour", 12)
         context.chat_data.pop("pending_months", None)
         end_date_iso = context.chat_data.pop("pending_end_date", None)
         context.chat_data.pop(AWAIT, None)
-        add_reminder(chat_id, days, text, end_date_iso)
+        add_reminder(chat_id, days, hour, text, end_date_iso)
         end_str = (
             datetime.fromisoformat(end_date_iso).strftime("%d %b %Y")
             if end_date_iso else "no end date"
         )
         await update.message.reply_text(
             f"Reminder added! Day(s) {', '.join(str(d) for d in days)} "
-            f"at 12:00 PM SGT until {end_str}.\n\nMessage:\n{text}"
+            f"at {HOUR_LABELS[hour]} SGT until {end_str}.\n\nMessage:\n{text}"
         )
 
     elif awaiting == AWAIT_DAYS_EDIT:
@@ -447,7 +521,7 @@ async def handle_reply(update, context):
 # /status
 # ---------------------------------------------------------------------------
 
-async def status(update, context):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reminders = get_reminders(update.effective_chat.id)
     if not reminders:
         await update.message.reply_text("No reminders configured. Use /setup to create one.")
@@ -460,17 +534,19 @@ async def status(update, context):
         status_str = "\u23f8 Paused" if r.get("paused") else "\u25b6\ufe0f Active"
         lines.append(
             f"{i}. {status_str}\n"
-            f"   Days: {days_str} \u00b7 Until: {end_str}\n"
+            f"   Days: {days_str} \u00b7 Time: {_time_label(r)} SGT \u00b7 Until: {end_str}\n"
             f"   Message: {r['message']}"
         )
     await update.message.reply_text("\n\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
-# Scheduled job
+# Scheduled job -- fires at 9 AM, 12 PM, and 9 PM SGT
+# Each invocation only sends reminders matching its hour.
 # ---------------------------------------------------------------------------
 
-async def send_reminders(context):
+async def send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_hour = context.job.data["hour"]
     today = datetime.now(SGT).date()
     config = load_config()
 
@@ -479,6 +555,8 @@ async def send_reminders(context):
         changed = False
         for r in reminders:
             if r.get("paused"):
+                continue
+            if r.get("hour", 12) != job_hour:
                 continue
             days = r.get("days", [])
             message = r.get("message", "")
@@ -489,26 +567,30 @@ async def send_reminders(context):
                 continue
             if today.day not in days:
                 continue
+
             is_final = False
             if end_date_str:
                 end_date = date.fromisoformat(end_date_str)
                 nrd = next_reminder_date(days, today)
                 if nrd is None or nrd > end_date:
                     is_final = True
+
             send_text = message
             if is_final:
                 send_text += (
                     "\n\nThis is the final reminder for this alert. "
                     "Use /setup to continue or create a new one."
                 )
+
             try:
                 await context.bot.send_message(int(chat_id_str), send_text)
-                logger.info("Sent reminder %d to chat %s", r["id"], chat_id_str)
+                logger.info("Sent reminder %d to chat %s (hour=%d)", r["id"], chat_id_str, job_hour)
                 if is_final:
                     r["paused"] = True
                     changed = True
             except Exception as exc:
                 logger.error("Failed to send reminder %d to %s: %s", r["id"], chat_id_str, exc)
+
         if changed:
             config[chat_id_str] = chat_cfg
             save_config(config)
@@ -518,18 +600,22 @@ async def send_reminders(context):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("setup", setup_start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(setup_callback, pattern=r"^setup:"))
     app.add_handler(CallbackQueryHandler(reminder_callback, pattern=r"^rem:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply))
-    app.job_queue.run_daily(
-        send_reminders,
-        time=time(hour=12, minute=0, tzinfo=SGT),
-        name="daily_reminder",
-    )
+
+    for hour in (9, 12, 21):
+        app.job_queue.run_daily(
+            send_reminders,
+            time=time(hour=hour, minute=0, tzinfo=SGT),
+            name=f"daily_reminder_{hour}",
+            data={"hour": hour},
+        )
+
     logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
 
