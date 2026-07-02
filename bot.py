@@ -568,7 +568,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ordinal = data.split(":")[2]
         context.chat_data["pending_ordinal"] = ordinal
         await query.edit_message_text(
-            f"{ORDINAL_LABELS[ordinal]}… which weekday?",
+            "Alright man. Which particular day would you like it on venerable sir?",
             reply_markup=_weekday_keyboard("setup:wd", "setup:freq:monthly"),
         )
 
@@ -748,7 +748,7 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ordinal = action.split(":", 1)[1]
         update_reminder(chat_id, rid, ordinal=ordinal)
         await query.edit_message_text(
-            f"{ORDINAL_LABELS[ordinal]}… which weekday?",
+            "Alright man. Which particular day would you like it on venerable sir?",
             reply_markup=_weekday_keyboard(f"rem:{rid}:set_wd", f"rem:{rid}:view"),
         )
 
