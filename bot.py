@@ -2,7 +2,7 @@ import calendar
 import json
 import logging
 import os
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -38,18 +38,40 @@ CB_BACK_MENU  = "setup:back_menu"
 
 # Chat state keys
 AWAIT = "awaiting"
-AWAIT_DAYS_NEW  = "days_new"
-AWAIT_MSG_NEW   = "msg_new"
-AWAIT_DAYS_EDIT = "days_edit"
-AWAIT_MSG_EDIT  = "msg_edit"
+AWAIT_DAYS_NEW   = "days_new"
+AWAIT_MSG_NEW    = "msg_new"
+AWAIT_DAYS_EDIT  = "days_edit"
+AWAIT_MSG_EDIT   = "msg_edit"
+AWAIT_START_NEW  = "start_new"
+AWAIT_START_EDIT = "start_edit"
 
 HOUR_LABELS = {9: "9:00 AM", 12: "12:00 PM", 21: "9:00 PM"}
 SEND_HOURS = (9, 12, 21)
 
+WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+ORDINAL_LABELS = {
+    "first": "First",
+    "second": "Second",
+    "second_last": "Second last",
+    "last": "Last",
+}
+REMINDER_HEADER = "🙌 REMINDER:"
+
+# Keys holding in-progress /setup state in chat_data
+PENDING_KEYS = (
+    "pending_type", "pending_days", "pending_weekday", "pending_ordinal",
+    "pending_start_date", "pending_hour", "pending_end_date",
+)
+
 HELP_TEXT = (
-    "👋 *Monthly reminder bot*\n\n"
-    "I send a message to this chat on the days of the month you pick, at a "
-    "time you choose (9 AM, 12 PM or 9 PM, Singapore time).\n\n"
+    "👋 *Reminder bot*\n\n"
+    "I send reminders to this chat at 9 AM, 12 PM or 9 PM (Singapore time). "
+    "You can schedule them:\n"
+    "• on specific date(s) of the month, e.g. the 1st and 15th\n"
+    "• weekly, on a day of the week\n"
+    "• monthly, on e.g. the first or last Monday\n"
+    "• quarterly, every 3 months from a start date\n\n"
+    "Every reminder starts with a 🙌 REMINDER: header.\n\n"
     "*Commands*\n"
     "• /setup — create or manage reminders\n"
     "• /status — see your active reminders and when each fires next\n"
@@ -88,18 +110,23 @@ def _save_reminders(chat_id: int, reminders: list) -> None:
     save_config(config)
 
 
-def add_reminder(chat_id: int, days: list, hour: int, message: str, end_date: str) -> int:
+def add_reminder(chat_id: int, rtype: str, hour: int, message: str, end_date, **schedule) -> int:
+    """`schedule` holds the type-specific fields:
+    monthly_date -> days, weekly -> weekday, monthly_weekday -> ordinal+weekday,
+    quarterly -> start_date. `end_date` of None means indefinite."""
     reminders = get_reminders(chat_id)
     new_id = max((r["id"] for r in reminders), default=0) + 1
-    reminders.append({
+    reminder = {
         "id": new_id,
-        "days": days,
+        "type": rtype,
         "hour": hour,
         "message": message,
         "paused": False,
         "end_date": end_date,
         "last_sent": None,
-    })
+    }
+    reminder.update(schedule)
+    reminders.append(reminder)
     _save_reminders(chat_id, reminders)
     return new_id
 
@@ -147,15 +174,51 @@ def day_fires_today(days: list, today: date) -> bool:
     return today.day in effective_days(days, today.year, today.month)
 
 
-def next_reminder_date(days: list, after: date):
-    eff = effective_days(days, after.year, after.month)
-    for d in sorted(eff):
-        if d > after.day:
-            return after.replace(day=d)
-    nm = add_months(after, 1)
-    nm_eff = effective_days(days, nm.year, nm.month)
-    if nm_eff:
-        return nm.replace(day=min(nm_eff))
+def reminder_type(r: dict) -> str:
+    # Reminders created before schedule types existed are date-of-month ones.
+    return r.get("type", "monthly_date")
+
+
+def _weekday_occurrences(year: int, month: int, weekday: int) -> list:
+    last = calendar.monthrange(year, month)[1]
+    return [d for d in range(1, last + 1) if date(year, month, d).weekday() == weekday]
+
+
+ORDINAL_INDEX = {"first": 0, "second": 1, "second_last": -2, "last": -1}
+
+
+def fires_on(r: dict, day: date) -> bool:
+    t = reminder_type(r)
+    if t == "weekly":
+        return day.weekday() == r["weekday"]
+    if t == "monthly_weekday":
+        occ = _weekday_occurrences(day.year, day.month, r["weekday"])
+        return day.day == occ[ORDINAL_INDEX[r["ordinal"]]]
+    if t == "quarterly":
+        start = date.fromisoformat(r["start_date"])
+        if day < start:
+            return False
+        months_apart = (day.year - start.year) * 12 + (day.month - start.month)
+        if months_apart % 3 != 0:
+            return False
+        # Clamp to the last day of short months, same as monthly_date days.
+        last = calendar.monthrange(day.year, day.month)[1]
+        return day.day == min(start.day, last)
+    days = r.get("days", [])
+    return bool(days) and day_fires_today(days, day)
+
+
+def next_occurrence(r: dict, after: date):
+    """First date strictly after `after` on which this schedule matches."""
+    if reminder_type(r) == "quarterly":
+        start = date.fromisoformat(r["start_date"])
+        if start > after:
+            return start
+    d = after
+    for _ in range(120):  # longest gap between fires is ~3 months (quarterly)
+        d += timedelta(days=1)
+        if fires_on(r, d):
+            return d
     return None
 
 
@@ -171,14 +234,11 @@ def next_fire_date(r: dict, today: date):
     """
     if r.get("paused"):
         return None
-    days = r.get("days", [])
-    if not days:
-        return None
     already_sent_today = r.get("last_sent") == today.isoformat()
-    if day_fires_today(days, today) and not already_sent_today:
+    if fires_on(r, today) and not already_sent_today:
         candidate = today
     else:
-        candidate = next_reminder_date(days, today)
+        candidate = next_occurrence(r, today)
     if candidate is None:
         return None
     end = r.get("end_date")
@@ -207,12 +267,61 @@ def _time_label(r: dict) -> str:
     return HOUR_LABELS.get(r.get("hour", 12), "12:00 PM")
 
 
+def _schedule_label(r: dict) -> str:
+    t = reminder_type(r)
+    if t == "weekly":
+        return f"Every {WEEKDAY_LABELS[r['weekday']]}"
+    if t == "monthly_weekday":
+        return f"{ORDINAL_LABELS[r['ordinal']]} {WEEKDAY_LABELS[r['weekday']]} of the month"
+    if t == "quarterly":
+        start = date.fromisoformat(r["start_date"])
+        return f"Every 3 months from {start.strftime('%d %b %Y')}"
+    days_str = ", ".join(str(d) for d in sorted(r.get("days", [])))
+    return f"Day {days_str} of the month"
+
+
 def _reminder_label(r: dict) -> str:
-    days_str = " & ".join(str(d) for d in sorted(r["days"]))
     msg = r["message"]
-    preview = (msg[:18] + "…") if len(msg) > 18 else msg
+    preview = (msg[:14] + "…") if len(msg) > 14 else msg
     prefix = "⏸ " if r.get("paused") else ""
-    return f"{prefix}Day {days_str}  ·  {_time_label(r)}  ·  {preview}"
+    return f"{prefix}{_schedule_label(r)} · {_time_label(r)} · {preview}"
+
+
+def _parse_date(text: str):
+    for fmt in ("%Y-%m-%d", "%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _pending_reminder(chat_data: dict) -> dict:
+    """Pseudo-reminder built from in-progress /setup state, for labels."""
+    return {
+        "type": chat_data.get("pending_type", "monthly_date"),
+        "days": chat_data.get("pending_days", []),
+        "weekday": chat_data.get("pending_weekday", 0),
+        "ordinal": chat_data.get("pending_ordinal", "first"),
+        "start_date": chat_data.get(
+            "pending_start_date", datetime.now(SGT).date().isoformat()
+        ),
+        "hour": chat_data.get("pending_hour", 12),
+    }
+
+
+def _time_back_cb(chat_data: dict) -> str:
+    """Back target from the time picker — returns to the schedule step
+    for whichever reminder type is being set up."""
+    t = chat_data.get("pending_type", "monthly_date")
+    if t == "weekly":
+        return "setup:freq:weekly"          # re-shows the weekday picker
+    if t == "monthly_weekday":
+        ordinal = chat_data.get("pending_ordinal", "first")
+        return f"setup:ord:{ordinal}"       # re-shows the weekday picker
+    if t == "quarterly":
+        return "setup:back_qdate"
+    return "setup:back_days"
 
 
 def _menu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
@@ -243,8 +352,48 @@ def _months_keyboard(back_cb: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(str(m), callback_data=f"setup:months:{m}") for m in range(r, r + 3)]
         for r in range(1, 12, 3)
     ]
+    rows.append([InlineKeyboardButton("♾ Indefinite", callback_data="setup:months:inf")])
     rows.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
+
+
+def _kind_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📆 Specific date(s) of the month", callback_data="setup:kind:date")],
+        [InlineKeyboardButton("📅 Day of the week", callback_data="setup:kind:day")],
+        [InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)],
+    ])
+
+
+def _freq_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Weekly", callback_data="setup:freq:weekly")],
+        [InlineKeyboardButton("🗓 Monthly", callback_data="setup:freq:monthly")],
+        [InlineKeyboardButton("📈 Quarterly", callback_data="setup:freq:quarterly")],
+        [InlineKeyboardButton("← Back", callback_data="setup:back_kind")],
+    ])
+
+
+def _weekday_keyboard(cb_prefix: str, back_cb: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(WEEKDAY_LABELS[i], callback_data=f"{cb_prefix}:{i}") for i in range(4)],
+        [InlineKeyboardButton(WEEKDAY_LABELS[i], callback_data=f"{cb_prefix}:{i}") for i in range(4, 7)],
+        [InlineKeyboardButton("← Back", callback_data=back_cb)],
+    ])
+
+
+def _ordinal_keyboard(cb_prefix: str, back_cb: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("First", callback_data=f"{cb_prefix}:first"),
+            InlineKeyboardButton("Second", callback_data=f"{cb_prefix}:second"),
+        ],
+        [
+            InlineKeyboardButton("Second last", callback_data=f"{cb_prefix}:second_last"),
+            InlineKeyboardButton("Last", callback_data=f"{cb_prefix}:last"),
+        ],
+        [InlineKeyboardButton("← Back", callback_data=back_cb)],
+    ])
 
 
 def _time_keyboard(back_cb: str) -> InlineKeyboardMarkup:
@@ -266,6 +415,7 @@ def _duration_keyboard(rid: int, back_cb: str) -> InlineKeyboardMarkup:
         ]
         for r in range(1, 12, 3)
     ]
+    rows.append([InlineKeyboardButton("♾ Indefinite", callback_data=f"rem:{rid}:set_months:inf")])
     rows.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
@@ -281,9 +431,8 @@ def _edit_done_keyboard(rid) -> InlineKeyboardMarkup:
 def _reminder_detail(r: dict):
     rid = r["id"]
     today = datetime.now(SGT).date()
-    days_str = ", ".join(str(d) for d in sorted(r["days"]))
     end = r.get("end_date")
-    end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "no end date"
+    end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "♾ indefinite"
     expired = is_expired(r, today)
     if r.get("paused"):
         status_str = "⏸ Paused"
@@ -295,7 +444,7 @@ def _reminder_detail(r: dict):
     next_str = nxt.strftime("%a %d %b %Y") if nxt else "—"
     toggle_label = "▶️ Resume" if r.get("paused") else "⏸ Pause"
     text = (
-        f"Days: {days_str}\n"
+        f"Schedule: {_schedule_label(r)}\n"
         f"Time: {_time_label(r)} SGT\n"
         f"Message: {r['message']}\n"
         f"Until: {end_str}\n"
@@ -303,7 +452,7 @@ def _reminder_detail(r: dict):
         f"Status: {status_str}"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Change days",     callback_data=f"rem:{rid}:change_days")],
+        [InlineKeyboardButton("📅 Change schedule", callback_data=f"rem:{rid}:change_days")],
         [InlineKeyboardButton("🕐 Change time",     callback_data=f"rem:{rid}:change_time")],
         [InlineKeyboardButton("💬 Change message",  callback_data=f"rem:{rid}:change_msg")],
         [InlineKeyboardButton("🗓 Change duration", callback_data=f"rem:{rid}:change_duration")],
@@ -362,14 +511,65 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = query.message.chat.id
     data = query.data
 
-    if data == CB_NEW:
-        context.chat_data[AWAIT] = AWAIT_DAYS_NEW
+    if data in (CB_NEW, "setup:back_kind"):
+        context.chat_data.pop(AWAIT, None)
+        if data == CB_NEW:
+            for key in PENDING_KEYS:
+                context.chat_data.pop(key, None)
         await query.edit_message_text(
-            "Which days of the month should I send reminders?\n"
-            "Reply with day numbers separated by spaces — e.g. 1 15 28",
+            "When should this reminder fire?",
+            reply_markup=_kind_keyboard(),
+        )
+
+    elif data == "setup:kind:day":
+        context.chat_data.pop(AWAIT, None)
+        await query.edit_message_text(
+            "How often should it repeat?",
+            reply_markup=_freq_keyboard(),
+        )
+
+    elif data == "setup:freq:weekly":
+        context.chat_data["pending_type"] = "weekly"
+        context.chat_data.pop(AWAIT, None)
+        await query.edit_message_text(
+            "Which day of the week should the reminder go out?",
+            reply_markup=_weekday_keyboard("setup:wd", "setup:kind:day"),
+        )
+
+    elif data == "setup:freq:monthly":
+        context.chat_data["pending_type"] = "monthly_weekday"
+        context.chat_data.pop(AWAIT, None)
+        await query.edit_message_text(
+            "Which occurrence in the month?",
+            reply_markup=_ordinal_keyboard("setup:ord", "setup:kind:day"),
+        )
+
+    elif data in ("setup:freq:quarterly", "setup:back_qdate"):
+        context.chat_data["pending_type"] = "quarterly"
+        context.chat_data[AWAIT] = AWAIT_START_NEW
+        await query.edit_message_text(
+            "When should the first reminder go out?\n"
+            "Reply with a start date — e.g. 15 Aug 2026 or 2026-08-15. "
+            "It will then repeat every 3 months on that date.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]]
+                [[InlineKeyboardButton("← Back", callback_data="setup:kind:day")]]
             ),
+        )
+
+    elif data.startswith("setup:ord:"):
+        ordinal = data.split(":")[2]
+        context.chat_data["pending_ordinal"] = ordinal
+        await query.edit_message_text(
+            f"{ORDINAL_LABELS[ordinal]}… which weekday?",
+            reply_markup=_weekday_keyboard("setup:wd", "setup:freq:monthly"),
+        )
+
+    elif data.startswith("setup:wd:"):
+        context.chat_data["pending_weekday"] = int(data.split(":")[2])
+        label = _schedule_label(_pending_reminder(context.chat_data))
+        await query.edit_message_text(
+            f"Schedule: {label}\n\nWhat time should I send the reminder?",
+            reply_markup=_time_keyboard(_time_back_cb(context.chat_data)),
         )
 
     elif data == CB_CHANGE:
@@ -406,56 +606,67 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=_menu_keyboard(chat_id),
         )
 
-    elif data == "setup:back_days":
+    elif data in ("setup:kind:date", "setup:back_days"):
+        context.chat_data["pending_type"] = "monthly_date"
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
             "Which days of the month should I send reminders?\n"
             "Reply with day numbers separated by spaces — e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)]]
+                [[InlineKeyboardButton("← Back", callback_data="setup:back_kind")]]
             ),
         )
 
     elif data == "setup:back_time":
-        # Back to time picker (days already stored)
-        days = context.chat_data.get("pending_days", [])
+        # Back to time picker (schedule already stored)
         context.chat_data.pop(AWAIT, None)
+        label = _schedule_label(_pending_reminder(context.chat_data))
         await query.edit_message_text(
-            f"Days noted: {', '.join(str(d) for d in days)}\n\nWhat time should I send the reminder?",
-            reply_markup=_time_keyboard("setup:back_days"),
+            f"Schedule: {label}\n\nWhat time should I send the reminder?",
+            reply_markup=_time_keyboard(_time_back_cb(context.chat_data)),
         )
 
     elif data == "setup:back_months":
         context.chat_data.pop(AWAIT, None)
-        days = context.chat_data.get("pending_days", [])
+        label = _schedule_label(_pending_reminder(context.chat_data))
         hour = context.chat_data.get("pending_hour", 12)
         await query.edit_message_text(
-            f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How many months should this reminder persist?",
+            f"Schedule: {label} at {HOUR_LABELS[hour]} SGT\n\n"
+            "How long should this reminder run?",
             reply_markup=_months_keyboard("setup:back_time"),
         )
 
     elif data.startswith("setup:time:"):
         hour = int(data.split(":")[2])
         context.chat_data["pending_hour"] = hour
-        days = context.chat_data.get("pending_days", [])
+        label = _schedule_label(_pending_reminder(context.chat_data))
         await query.edit_message_text(
-            f"Days noted: {', '.join(str(d) for d in days)} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How many months should this reminder persist?",
+            f"Schedule: {label} at {HOUR_LABELS[hour]} SGT\n\n"
+            "How long should this reminder run?",
             reply_markup=_months_keyboard("setup:back_time"),
         )
 
     elif data.startswith("setup:months:"):
-        months = int(data.split(":")[2])
-        end_date = add_months(datetime.now(SGT).date(), months)
-        context.chat_data["pending_months"] = months
-        context.chat_data["pending_end_date"] = end_date.isoformat()
+        choice = data.split(":")[2]
+        if choice == "inf":
+            context.chat_data["pending_end_date"] = None
+            duration_str = "running indefinitely until you pause or delete it."
+        else:
+            months = int(choice)
+            # Quarterly runs are measured from their start date, not today.
+            base = datetime.now(SGT).date()
+            if context.chat_data.get("pending_type") == "quarterly":
+                start_iso = context.chat_data.get("pending_start_date")
+                if start_iso:
+                    base = date.fromisoformat(start_iso)
+            end_date = add_months(base, months)
+            context.chat_data["pending_end_date"] = end_date.isoformat()
+            duration_str = f"{months} month(s), running until {end_date.strftime('%d %b %Y')}."
         context.chat_data[AWAIT] = AWAIT_MSG_NEW
-        days = context.chat_data.get("pending_days", [])
-        hour = context.chat_data.get("pending_hour", 12)
         await query.edit_message_text(
-            f"Got it — {months} month(s), running until {end_date.strftime('%d %b %Y')}.\n\n"
-            "What message should I send to this group on those days?",
+            f"Got it — {duration_str}\n\n"
+            "What message should I send to this group on those days?\n"
+            f'(Every reminder automatically starts with "{REMINDER_HEADER}")',
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("← Back", callback_data="setup:back_months")]]
             ),
@@ -487,14 +698,50 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(text, reply_markup=keyboard)
 
     elif action == "change_days":
-        context.chat_data[AWAIT] = AWAIT_DAYS_EDIT
-        context.chat_data["editing_id"] = rid
-        days_str = ", ".join(str(d) for d in sorted(r["days"]))
+        t = reminder_type(r)
+        back = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")]]
+        )
+        if t == "weekly":
+            await query.edit_message_text(
+                f"Current schedule: {_schedule_label(r)}\n\nPick a new weekday:",
+                reply_markup=_weekday_keyboard(f"rem:{rid}:set_wd", f"rem:{rid}:view"),
+            )
+        elif t == "monthly_weekday":
+            await query.edit_message_text(
+                f"Current schedule: {_schedule_label(r)}\n\nPick the occurrence in the month:",
+                reply_markup=_ordinal_keyboard(f"rem:{rid}:set_ord", f"rem:{rid}:view"),
+            )
+        elif t == "quarterly":
+            context.chat_data[AWAIT] = AWAIT_START_EDIT
+            context.chat_data["editing_id"] = rid
+            await query.edit_message_text(
+                f"Current schedule: {_schedule_label(r)}\n\n"
+                "Reply with a new start date — e.g. 15 Aug 2026 or 2026-08-15.",
+                reply_markup=back,
+            )
+        else:
+            context.chat_data[AWAIT] = AWAIT_DAYS_EDIT
+            context.chat_data["editing_id"] = rid
+            days_str = ", ".join(str(d) for d in sorted(r["days"]))
+            await query.edit_message_text(
+                f"Current days: {days_str}\n\nReply with the new days — e.g. 1 15 28",
+                reply_markup=back,
+            )
+
+    elif action.startswith("set_wd:"):
+        weekday = int(action.split(":")[1])
+        update_reminder(chat_id, rid, weekday=weekday)
+        r["weekday"] = weekday
+        text, keyboard = _reminder_detail(r)
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+    elif action.startswith("set_ord:"):
+        ordinal = action.split(":", 1)[1]
+        update_reminder(chat_id, rid, ordinal=ordinal)
         await query.edit_message_text(
-            f"Current days: {days_str}\n\nReply with the new days — e.g. 1 15 28",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")]]
-            ),
+            f"{ORDINAL_LABELS[ordinal]}… which weekday?",
+            reply_markup=_weekday_keyboard(f"rem:{rid}:set_wd", f"rem:{rid}:view"),
         )
 
     elif action == "change_time":
@@ -531,9 +778,8 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     elif action == "change_duration":
-        today = datetime.now(SGT).date()
         end = r.get("end_date")
-        end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "no end date"
+        end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "♾ indefinite"
         await query.edit_message_text(
             f"Current end date: {end_str}\n\n"
             "How many months from today should this reminder run?",
@@ -541,19 +787,21 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     elif action.startswith("set_months:"):
-        months = int(action.split(":")[1])
-        new_end = add_months(datetime.now(SGT).date(), months)
+        choice = action.split(":")[1]
+        if choice == "inf":
+            new_end_iso = None
+            headline = "Duration updated — now running indefinitely."
+        else:
+            new_end = add_months(datetime.now(SGT).date(), int(choice))
+            new_end_iso = new_end.isoformat()
+            headline = f"Duration updated — now running until {new_end.strftime('%d %b %Y')}."
         # Extending re-activates an ended/paused reminder and clears the
         # stale last_sent so it can fire again today if applicable.
-        update_reminder(chat_id, rid, end_date=new_end.isoformat(),
+        update_reminder(chat_id, rid, end_date=new_end_iso,
                         paused=False, last_sent=None)
         r = get_reminder_by_id(chat_id, rid)
         text, keyboard = _reminder_detail(r)
-        await query.edit_message_text(
-            f"Duration updated — now running until {new_end.strftime('%d %b %Y')}.\n\n"
-            + text,
-            reply_markup=keyboard,
-        )
+        await query.edit_message_text(headline + "\n\n" + text, reply_markup=keyboard)
 
     elif action == "toggle":
         today = datetime.now(SGT).date()
@@ -574,10 +822,10 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(text, reply_markup=keyboard)
 
     elif action == "delete":
-        days_str = ", ".join(str(d) for d in sorted(r["days"]))
         preview = (r["message"][:30] + "…") if len(r["message"]) > 30 else r["message"]
         await query.edit_message_text(
-            f"Delete this reminder?\n\nDays: {days_str}\nTime: {_time_label(r)} SGT\nMessage: {preview}",
+            f"Delete this reminder?\n\nSchedule: {_schedule_label(r)}\n"
+            f"Time: {_time_label(r)} SGT\nMessage: {preview}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🗑 Yes, delete", callback_data=f"rem:{rid}:confirm_delete")],
                 [InlineKeyboardButton("← Keep it",     callback_data=f"rem:{rid}:view")],
@@ -621,20 +869,55 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=_time_keyboard("setup:back_days"),
         )
 
-    elif awaiting == AWAIT_MSG_NEW:
-        days = context.chat_data.pop("pending_days", [])
-        hour = context.chat_data.pop("pending_hour", 12)
-        context.chat_data.pop("pending_months", None)
-        end_date_iso = context.chat_data.pop("pending_end_date", None)
+    elif awaiting == AWAIT_START_NEW:
+        start = _parse_date(text)
+        if start is None:
+            await update.message.reply_text(
+                "I couldn't read that date. Try a format like 15 Aug 2026 or 2026-08-15."
+            )
+            return
+        if start < datetime.now(SGT).date():
+            await update.message.reply_text(
+                "That date is in the past — please pick today or a later date."
+            )
+            return
+        context.chat_data["pending_start_date"] = start.isoformat()
         context.chat_data.pop(AWAIT, None)
-        add_reminder(chat_id, days, hour, text, end_date_iso)
-        end_str = (
-            datetime.fromisoformat(end_date_iso).strftime("%d %b %Y")
-            if end_date_iso else "no end date"
-        )
         await update.message.reply_text(
-            f"Reminder added! Day(s) {', '.join(str(d) for d in days)} "
-            f"at {HOUR_LABELS[hour]} SGT until {end_str}.\n\nMessage:\n{text}",
+            f"Start date noted: {start.strftime('%d %b %Y')}, repeating every 3 months."
+            f"{_short_month_note([start.day])}"
+            "\n\nWhat time should I send the reminder?",
+            reply_markup=_time_keyboard("setup:back_qdate"),
+        )
+
+    elif awaiting == AWAIT_MSG_NEW:
+        rtype = context.chat_data.get("pending_type", "monthly_date")
+        hour = context.chat_data.get("pending_hour", 12)
+        end_date_iso = context.chat_data.get("pending_end_date")
+        schedule = {}
+        if rtype == "weekly":
+            schedule["weekday"] = context.chat_data.get("pending_weekday", 0)
+        elif rtype == "monthly_weekday":
+            schedule["ordinal"] = context.chat_data.get("pending_ordinal", "first")
+            schedule["weekday"] = context.chat_data.get("pending_weekday", 0)
+        elif rtype == "quarterly":
+            schedule["start_date"] = context.chat_data.get(
+                "pending_start_date", datetime.now(SGT).date().isoformat()
+            )
+        else:
+            schedule["days"] = context.chat_data.get("pending_days", [])
+        for key in PENDING_KEYS:
+            context.chat_data.pop(key, None)
+        context.chat_data.pop(AWAIT, None)
+        add_reminder(chat_id, rtype, hour, text, end_date_iso, **schedule)
+        end_str = (
+            "until " + datetime.fromisoformat(end_date_iso).strftime("%d %b %Y")
+            if end_date_iso else "indefinitely"
+        )
+        label = _schedule_label({"type": rtype, **schedule})
+        await update.message.reply_text(
+            f"Reminder added! {label} at {HOUR_LABELS[hour]} SGT, {end_str}.\n\n"
+            f"Message:\n{REMINDER_HEADER}\n{text}",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⚙️ Back to menu", callback_data=CB_BACK_MENU)]]
             ),
@@ -657,13 +940,35 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=_edit_done_keyboard(rid),
         )
 
+    elif awaiting == AWAIT_START_EDIT:
+        start = _parse_date(text)
+        if start is None:
+            await update.message.reply_text(
+                "I couldn't read that date. Try a format like 15 Aug 2026 or 2026-08-15."
+            )
+            return
+        if start < datetime.now(SGT).date():
+            await update.message.reply_text(
+                "That date is in the past — please pick today or a later date."
+            )
+            return
+        rid = context.chat_data.pop("editing_id", None)
+        context.chat_data.pop(AWAIT, None)
+        if rid is not None:
+            update_reminder(chat_id, rid, start_date=start.isoformat())
+        await update.message.reply_text(
+            f"Start date updated to {start.strftime('%d %b %Y')}, repeating every "
+            f"3 months.{_short_month_note([start.day])}",
+            reply_markup=_edit_done_keyboard(rid),
+        )
+
     elif awaiting == AWAIT_MSG_EDIT:
         rid = context.chat_data.pop("editing_id", None)
         context.chat_data.pop(AWAIT, None)
         if rid is not None:
             update_reminder(chat_id, rid, message=text)
         await update.message.reply_text(
-            f"Message updated to:\n\n{text}",
+            f"Message updated to:\n\n{REMINDER_HEADER}\n{text}",
             reply_markup=_edit_done_keyboard(rid),
         )
 
@@ -692,9 +997,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today = datetime.now(SGT).date()
     lines = ["Your reminders:\n"]
     for i, r in enumerate(reminders, 1):
-        days_str = ", ".join(str(d) for d in sorted(r["days"]))
         end = r.get("end_date")
-        end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "no end date"
+        end_str = datetime.fromisoformat(end).strftime("%d %b %Y") if end else "♾ indefinite"
         if r.get("paused"):
             status_str = "⏸ Paused"
         elif is_expired(r, today):
@@ -705,7 +1009,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         next_str = nxt.strftime("%a %d %b %Y") if nxt else "—"
         lines.append(
             f"{i}. {status_str}\n"
-            f"   Days: {days_str} · Time: {_time_label(r)} SGT · Until: {end_str}\n"
+            f"   {_schedule_label(r)} · Time: {_time_label(r)} SGT · Until: {end_str}\n"
             f"   Next fire: {next_str}\n"
             f"   Message: {r['message']}"
         )
@@ -734,14 +1038,13 @@ async def _send_for_hour(bot, job_hour: int) -> None:
                 continue
             if r.get("hour", 12) != job_hour:
                 continue
-            days = r.get("days", [])
             message = r.get("message", "")
             end_date_str = r.get("end_date")
-            if not days or not message:
+            if not message:
                 continue
             if end_date_str and today > date.fromisoformat(end_date_str):
                 continue
-            if not day_fires_today(days, today):
+            if not fires_on(r, today):
                 continue
             if r.get("last_sent") == today_iso:  # already sent today — dedupe
                 continue
@@ -749,11 +1052,11 @@ async def _send_for_hour(bot, job_hour: int) -> None:
             is_final = False
             if end_date_str:
                 end_date = date.fromisoformat(end_date_str)
-                nrd = next_reminder_date(days, today)
+                nrd = next_occurrence(r, today)
                 if nrd is None or nrd > end_date:
                     is_final = True
 
-            send_text = message
+            send_text = f"{REMINDER_HEADER}\n{message}"
             if is_final:
                 send_text += (
                     "\n\nThis is the final reminder for this alert. "

@@ -57,6 +57,10 @@ class _FakeDatetime:
     def fromisoformat(s):
         return _real_dt.fromisoformat(s)
 
+    @staticmethod
+    def strptime(s, fmt):
+        return _real_dt.strptime(s, fmt)
+
 
 bot.datetime = _FakeDatetime
 
@@ -86,6 +90,18 @@ def seed(chat_id, days, hour, message, months, start):
         "paused": False, "end_date": end.isoformat(), "last_sent": None,
     }]}
     return end
+
+
+def seed_typed(chat_id, rtype, hour, message, end_date, **schedule):
+    """Seed a typed reminder (weekly / monthly_weekday / quarterly)."""
+    reminder = {
+        "id": 1, "type": rtype, "hour": hour, "message": message,
+        "paused": False,
+        "end_date": end_date.isoformat() if end_date else None,
+        "last_sent": None,
+    }
+    reminder.update(schedule)
+    _STORE[str(chat_id)] = {"reminders": [reminder]}
 
 
 def run_timeline(start, end, hours=bot.SEND_HOURS):
@@ -194,6 +210,108 @@ nf = bot.next_fire_date(r_future, today)
 check("8. next_fire_date returns upcoming day-20", nf == date(2026, 7, 20), str(nf))
 r_paused = dict(r_future, paused=True)
 check("8b. next_fire_date is None when paused", bot.next_fire_date(r_paused, today) is None)
+
+# ── new schedule types ─────────────────────────────────────────────────────
+
+# 9. weekly — every Wednesday for 2 months
+_STORE.clear(); _SENT.clear()
+start, end = date(2026, 7, 1), date(2026, 9, 1)
+seed_typed(200, "weekly", 12, "Weekly!", end, weekday=2)  # Wed = 2
+run_timeline(start, end)
+fired = [s for s in _SENT if s[2] == 200]
+expected_weds = sum(
+    1 for i in range((end - start).days + 1)
+    if (start + timedelta(days=i)).weekday() == 2
+)
+check("9. weekly fires on every Wednesday", len(fired) == expected_weds,
+      f"{len(fired)} vs {expected_weds}")
+check("9b. weekly only fires on Wednesdays", all(d.weekday() == 2 for d, *_ in fired))
+check("9c. weekly gets exactly one FINAL",
+      sum("final reminder" in t for *_, t in fired) == 1)
+
+# 10. monthly by weekday — first Monday, 3 months
+_STORE.clear(); _SENT.clear()
+start, end = date(2026, 7, 1), date(2026, 10, 1)
+seed_typed(201, "monthly_weekday", 9, "First Mon", end, ordinal="first", weekday=0)
+run_timeline(start, end)
+fired = [s for s in _SENT if s[2] == 201]
+check("10. first-Monday fires once per month",
+      len(fired) == 3, f"{len(fired)}: {[d.isoformat() for d, *_ in fired]}")
+check("10b. all are Mondays in days 1-7",
+      all(d.weekday() == 0 and d.day <= 7 for d, *_ in fired))
+
+# 10c. last Friday of the month
+_STORE.clear(); _SENT.clear()
+start, end = date(2026, 7, 1), date(2026, 10, 1)
+seed_typed(202, "monthly_weekday", 21, "Last Fri", end, ordinal="last", weekday=4)
+run_timeline(start, end)
+fired = [s for s in _SENT if s[2] == 202]
+check("10c. last-Friday: all Fridays in the final 7 days of the month",
+      len(fired) >= 3 and all(
+          d.weekday() == 4 and d.day > bot.calendar.monthrange(d.year, d.month)[1] - 7
+          for d, *_ in fired))
+
+# 10d. second-last Tuesday
+_STORE.clear(); _SENT.clear()
+start, end = date(2026, 7, 1), date(2026, 9, 1)
+seed_typed(203, "monthly_weekday", 12, "2nd-last Tue", end, ordinal="second_last", weekday=1)
+run_timeline(start, end)
+fired = [s for s in _SENT if s[2] == 203]
+ok = all(
+    d.day == [x for x in range(1, bot.calendar.monthrange(d.year, d.month)[1] + 1)
+              if date(d.year, d.month, x).weekday() == 1][-2]
+    for d, *_ in fired)
+check("10d. second-last Tuesday matches computed dates", len(fired) >= 2 and ok)
+
+# 11. quarterly — starts 30 Nov 2026, 12 months, Feb clamp
+_STORE.clear(); _SENT.clear()
+start = date(2026, 11, 30)
+end = bot.add_months(start, 12)  # 30 Nov 2027
+seed_typed(204, "quarterly", 12, "Quarterly", end, start_date=start.isoformat())
+run_timeline(date(2026, 11, 1), end)
+fired = [(d, h) for d, h, cid, _ in _SENT if cid == 204]
+expected = [date(2026, 11, 30), date(2027, 2, 28), date(2027, 5, 30),
+            date(2027, 8, 30), date(2027, 11, 30)]
+check("11. quarterly fires every 3 months incl. Feb clamp",
+      [d for d, _ in fired] == expected,
+      f"{[d.isoformat() for d, _ in fired]}")
+
+# 11b. quarterly next_fire_date before the start date is the start date
+r_q = {"type": "quarterly", "start_date": "2027-03-15", "hour": 12,
+       "paused": False, "end_date": None, "last_sent": None}
+check("11b. quarterly next fire before start = start",
+      bot.next_fire_date(r_q, date(2026, 7, 10)) == date(2027, 3, 15))
+
+# 12. indefinite (end_date None) — keeps firing, never FINAL
+_STORE.clear(); _SENT.clear()
+seed_typed(205, "weekly", 12, "Forever", None, weekday=0)
+run_timeline(date(2026, 7, 1), date(2026, 9, 30))
+fired = [s for s in _SENT if s[2] == 205]
+check("12. indefinite reminder keeps firing", len(fired) >= 12, f"{len(fired)}")
+check("12b. indefinite never sends FINAL",
+      not any("final reminder" in t for *_, t in fired))
+check("12c. indefinite reminder not auto-paused",
+      not _STORE["205"]["reminders"][0]["paused"])
+
+# 13. every send starts with the reminder header
+_STORE.clear(); _SENT.clear()
+seed(206, [1], 12, "Check header", 1, date(2026, 7, 1))
+run_timeline(date(2026, 7, 1), date(2026, 8, 1))
+fired = [s for s in _SENT if s[2] == 206]
+check("13. sends start with the 🙌 REMINDER: header",
+      bool(fired) and all(t.startswith(bot.REMINDER_HEADER + "\n") for *_, t in fired))
+
+# 14. date parsing for the quarterly start-date prompt
+cases = {
+    "2026-08-15": date(2026, 8, 15),
+    "15 Aug 2026": date(2026, 8, 15),
+    "15 August 2026": date(2026, 8, 15),
+    "15/08/2026": date(2026, 8, 15),
+    "not a date": None,
+    "32 Aug 2026": None,
+}
+check("14. _parse_date handles all supported formats",
+      all(bot._parse_date(k) == v for k, v in cases.items()))
 
 print("\n" + "=" * 66)
 if _failures:

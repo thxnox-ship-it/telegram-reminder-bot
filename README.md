@@ -1,9 +1,17 @@
 # Telegram Reminder Bot
 
-Sends a message to a Telegram chat on chosen **days of the month**, at a chosen
-time (9 AM / 12 PM / 9 PM, Singapore time). Reminders run for a set number of
-months and then flag a final message. Built with
-[python-telegram-bot](https://python-telegram-bot.org/).
+Sends reminder messages to a Telegram chat at a chosen time (9 AM / 12 PM /
+9 PM, Singapore time) on one of four schedules:
+
+- **Date(s) of the month** — e.g. the 1st and 15th
+- **Weekly** — a chosen day of the week
+- **Monthly by weekday** — the first / second / second-last / last X-day
+  (e.g. "first Monday of the month")
+- **Quarterly** — every 3 months from a chosen start date
+
+Reminders run for a set number of months (final message flagged) or
+**indefinitely**. Every reminder message starts with a `🙌 REMINDER:` header.
+Built with [python-telegram-bot](https://python-telegram-bot.org/).
 
 ## Commands
 
@@ -45,7 +53,8 @@ On startup the bot logs the resolved path and warns if it looks ephemeral
   redeploy, cold start), on startup it delivers any of *today's* earlier slots
   that were missed — once each.
 - **End-of-month clamp.** Day 29/30/31 on a shorter month is sent on the last
-  day of that month instead of being skipped (e.g. day 31 → 28 Feb).
+  day of that month instead of being skipped (e.g. day 31 → 28 Feb). The same
+  clamp applies to quarterly start days.
 
 ## Running locally
 
@@ -62,7 +71,9 @@ python bot.py
 actual `send_reminders()` / `catch_up()` jobs across simulated timelines
 (faked clock, in-memory store, captured sends). It covers monthly firing, hour
 filtering, end-of-month clamping, pausing, dedupe, catch-up, extending an ended
-reminder, and next-fire calculation.
+reminder, next-fire calculation, weekly and monthly-by-weekday schedules,
+quarterly firing (incl. the Feb clamp), indefinite reminders, the message
+header, and start-date parsing.
 
 ```bash
 python3 test_schedule.py    # exits non-zero on failure
