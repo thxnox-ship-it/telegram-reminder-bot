@@ -317,6 +317,198 @@ cases = {
 check("14. _parse_date handles all supported formats",
       all(bot._parse_date(k) == v for k, v in cases.items()))
 
+# ── stress test: frequency correctness ──────────────────────────────────────
+#
+# These checks build EXPECTED fire-dates from scratch (plain calendar
+# arithmetic, not by calling bot.py's own scheduling helpers) and compare
+# them against what the real send job actually fired. That way a bug shared
+# between the "expected" and "actual" code paths can't hide.
+import calendar as _cal
+
+
+def ref_weekday_dates(weekday, start, end):
+    out, d = [], start
+    while d <= end:
+        if d.weekday() == weekday:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def ref_monthly_weekday_dates(ordinal, weekday, start, end):
+    idx = {"first": 0, "second": 1, "second_last": -2, "last": -1}[ordinal]
+    out = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        last_day = _cal.monthrange(y, m)[1]
+        occurrences = [d for d in range(1, last_day + 1)
+                       if date(y, m, d).weekday() == weekday]
+        dt = date(y, m, occurrences[idx])
+        if start <= dt <= end:
+            out.append(dt)
+        m += 1
+        if m == 13:
+            m, y = 1, y + 1
+    return out
+
+
+print("\n" + "=" * 66 + "\nSTRESS TEST — frequency correctness\n" + "=" * 66)
+
+# S1. Weekly: every weekday, spanning a year+ boundary, checked against a
+# brute-force day-by-day scan.
+for wd in range(7):
+    _STORE.clear(); _SENT.clear()
+    start = date(2026, 11, 15)
+    end = bot.add_months(start, 13)  # crosses a year boundary
+    seed_typed(300 + wd, "weekly", 9, f"wd{wd}", end, weekday=wd)
+    run_timeline(start, end)
+    fired_dates = sorted(d for d, h, cid, t in _SENT if cid == 300 + wd)
+    expected = ref_weekday_dates(wd, start, end)
+    check(f"S1.{wd} weekly({bot.WEEKDAY_LABELS[wd]}) matches brute-force scan",
+          fired_dates == expected,
+          f"{len(fired_dates)} vs {len(expected)}")
+
+# S2. Monthly-by-weekday: every ordinal x weekday combo, spanning 14 months
+# including a leap February (2028), checked against an independent
+# per-month occurrence calculation.
+for ordinal in ("first", "second", "second_last", "last"):
+    for wd in range(7):
+        _STORE.clear(); _SENT.clear()
+        start = date(2027, 1, 1)
+        end = bot.add_months(start, 14)  # through Feb 2028 (leap)
+        seed_typed(400, "monthly_weekday", 21, "mw", end, ordinal=ordinal, weekday=wd)
+        run_timeline(start, end)
+        fired_dates = sorted(d for d, h, cid, t in _SENT if cid == 400)
+        expected = ref_monthly_weekday_dates(ordinal, wd, start, end)
+        detail = "" if fired_dates == expected else f"{fired_dates} vs {expected}"
+        check(f"S2.{ordinal}.{wd} monthly_weekday matches independent calc",
+              fired_dates == expected, detail)
+
+# S3. Quarterly across a leap-year Feb 29, hand-computed expected dates
+# (not derived from bot.add_months, to avoid testing a function against
+# itself).
+_STORE.clear(); _SENT.clear()
+start = date(2027, 11, 30)
+end = bot.add_months(start, 15)  # 2029-02-28
+seed_typed(401, "quarterly", 9, "q29", end, start_date=start.isoformat())
+run_timeline(start, end)
+fired_dates = sorted(d for d, h, cid, t in _SENT if cid == 401)
+expected = [
+    date(2027, 11, 30),
+    date(2028, 2, 29),   # 2028 is a leap year — no clamp
+    date(2028, 5, 30),
+    date(2028, 8, 30),
+    date(2028, 11, 30),
+    date(2029, 2, 28),   # 2029 is not a leap year — clamped
+]
+check("S3. quarterly day-30 start crosses leap and non-leap Februarys correctly",
+      fired_dates == expected, f"{fired_dates}")
+
+print("\n" + "=" * 66 + "\nSTRESS TEST — duration / months-count correctness\n" + "=" * 66)
+
+
+# ── minimal fakes to drive the actual interactive setup_callback handler ────
+class _FakeChat:
+    def __init__(self, id_, type_="private"):
+        self.id = id_
+        self.type = type_
+
+
+class _FakeUser:
+    def __init__(self, id_=1):
+        self.id = id_
+
+
+class _FakeQuery:
+    def __init__(self, data, chat):
+        self.data = data
+        self.message = type("M", (), {"chat": chat})()
+        self.edits = []
+
+    async def answer(self, *a, **kw):
+        pass
+
+    async def edit_message_text(self, text, reply_markup=None):
+        self.edits.append(text)
+
+
+class _FakeUpdate:
+    def __init__(self, query, chat, user):
+        self.callback_query = query
+        self.effective_chat = chat
+        self.effective_user = user
+
+
+class _FakeSetupCtx:
+    def __init__(self, chat_data):
+        self.chat_data = chat_data
+        self.bot = _FakeBot()
+
+
+async def press(data, chat_data, chat_id=999):
+    chat = _FakeChat(chat_id)
+    query = _FakeQuery(data, chat)
+    update = _FakeUpdate(query, chat, _FakeUser())
+    ctx = _FakeSetupCtx(chat_data)
+    await bot.setup_callback(update, ctx)
+    return ctx.chat_data
+
+
+# S4. "months" duration picker sets the correct pending_end_date for a
+# non-quarterly type (base = today).
+_set_now(date(2026, 3, 10), 0)
+for months in (1, 5, 12):
+    cd = asyncio.run(press(f"setup:months:{months}", {"pending_type": "weekly", "pending_weekday": 2}))
+    expected_end = bot.add_months(date(2026, 3, 10), months)
+    check(f"S4.{months} weekly duration picker uses TODAY as base",
+          cd.get("pending_end_date") == expected_end.isoformat(),
+          f"{cd.get('pending_end_date')} vs {expected_end.isoformat()}")
+
+# S5. For quarterly, the "months" duration picker must base itself on the
+# chosen START DATE, not today (they can be far apart).
+_set_now(date(2026, 3, 10), 0)
+for months in (3, 9):
+    cd = asyncio.run(press(
+        f"setup:months:{months}",
+        {"pending_type": "quarterly", "pending_start_date": date(2026, 8, 31).isoformat()},
+    ))
+    expected_end = bot.add_months(date(2026, 8, 31), months)
+    check(f"S5.{months} quarterly duration picker uses START DATE as base",
+          cd.get("pending_end_date") == expected_end.isoformat(),
+          f"{cd.get('pending_end_date')} vs {expected_end.isoformat()}")
+
+# S6. "Indefinite" always yields end_date None, for every type.
+for rtype, extra in (
+    ("monthly_date", {}),
+    ("weekly", {"pending_weekday": 0}),
+    ("monthly_weekday", {"pending_ordinal": "first", "pending_weekday": 0}),
+    ("quarterly", {"pending_start_date": date(2026, 8, 31).isoformat()}),
+):
+    cd = asyncio.run(press("setup:months:inf", {"pending_type": rtype, **extra}))
+    check(f"S6.{rtype} Indefinite sets pending_end_date to None",
+          cd.get("pending_end_date") is None and "pending_end_date" in cd)
+
+# S7. End-to-end: the number of months chosen in the picker is exactly the
+# number of months the reminder actually keeps firing for, then stops.
+for months in (1, 2, 6, 11):
+    _STORE.clear(); _SENT.clear()
+    start = date(2026, 5, 1)
+    end = bot.add_months(start, months)
+    seed_typed(500, "weekly", 9, "S7", end, weekday=start.weekday())
+    run_timeline(start, end)
+    fired = sorted(d for d, h, cid, t in _SENT if cid == 500)
+    check(f"S7.{months} last fire is on/before the {months}-month end date",
+          bool(fired) and fired[-1] <= end,
+          f"last={fired[-1] if fired else None} end={end}")
+    check(f"S7.{months}b exactly one FINAL message, on the last fire",
+          sum("final reminder" in t for d, h, cid, t in _SENT if cid == 500) == 1
+          and "final reminder" in next(t for d, h, cid, t in _SENT
+                                       if cid == 500 and d == fired[-1]))
+    # nothing fires again once end_date has passed
+    run_timeline(end + timedelta(days=1), end + timedelta(days=30))
+    check(f"S7.{months}c no sends after the reminder's own end_date",
+          len([s for s in _SENT if s[2] == 500]) == len(fired))
+
 print("\n" + "=" * 66)
 if _failures:
     print(f"FAILED: {len(_failures)} check(s): {_failures}")
