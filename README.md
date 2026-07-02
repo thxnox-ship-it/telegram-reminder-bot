@@ -1,7 +1,7 @@
 # Telegram Reminder Bot
 
 Sends reminder messages to a Telegram chat at a chosen time (9 AM / 12 PM /
-9 PM, Singapore time) on one of four schedules:
+3 PM / 6 PM / 9 PM, Singapore time) on one of four schedules:
 
 - **Date(s) of the month** — e.g. the 1st and 15th
 - **Weekly** — a chosen day of the week

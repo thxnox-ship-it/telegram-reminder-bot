@@ -150,6 +150,20 @@ fired, _ = scenario("2. Day 1 @ 09:00 — hour filter", 101, [1], 9,
                     "Morning", 2, date(2026, 7, 1))
 check("only 09:00 sends", all(h == 9 for _, h, _, _ in fired))
 
+# 2b/2c. new 3 PM / 6 PM slots fire correctly and don't leak into other hours
+fired, _ = scenario("2b. Day 1 @ 15:00 — coffee slot", 107, [1], 15,
+                    "Coffee time", 2, date(2026, 7, 1))
+check("2b. only 15:00 sends", bool(fired) and all(h == 15 for _, h, _, _ in fired))
+
+fired, _ = scenario("2c. Day 1 @ 18:00 — dinner slot", 108, [1], 18,
+                    "Dinner time", 2, date(2026, 7, 1))
+check("2c. only 18:00 sends", bool(fired) and all(h == 18 for _, h, _, _ in fired))
+
+check("2d. HOUR_LABELS and HOUR_EMOJI cover every SEND_HOURS entry",
+      all(h in bot.HOUR_LABELS and h in bot.HOUR_EMOJI for h in bot.SEND_HOURS))
+check("2e. SEND_HOURS is exactly the five expected slots",
+      bot.SEND_HOURS == (9, 12, 15, 18, 21), str(bot.SEND_HOURS))
+
 # 3. end-of-month clamp (day 31 across Feb)
 fired, _ = scenario("3. Day 31 across Feb (clamp)", 102, [31], 12,
                     "EOM", 3, date(2026, 1, 15))

@@ -50,8 +50,11 @@ AWAIT_MSG_EDIT   = "msg_edit"
 AWAIT_START_NEW  = "start_new"
 AWAIT_START_EDIT = "start_edit"
 
-HOUR_LABELS = {9: "9:00 AM", 12: "12:00 PM", 21: "9:00 PM"}
-SEND_HOURS = (9, 12, 21)
+HOUR_LABELS = {
+    9: "9:00 AM", 12: "12:00 PM", 15: "3:00 PM", 18: "6:00 PM", 21: "9:00 PM",
+}
+HOUR_EMOJI = {9: "🌅", 12: "☀️", 15: "☕", 18: "🍽️", 21: "🌙"}
+SEND_HOURS = (9, 12, 15, 18, 21)
 
 WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 ORDINAL_LABELS = {
@@ -405,14 +408,13 @@ def _ordinal_keyboard(cb_prefix: str, back_cb: str) -> InlineKeyboardMarkup:
 
 
 def _time_keyboard(back_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🌅 9:00 AM",  callback_data=f"setup:time:9"),
-            InlineKeyboardButton("☀️ 12:00 PM", callback_data=f"setup:time:12"),
-            InlineKeyboardButton("🌙 9:00 PM",  callback_data=f"setup:time:21"),
-        ],
-        [InlineKeyboardButton("← Back", callback_data=back_cb)],
-    ])
+    buttons = [
+        InlineKeyboardButton(f"{HOUR_EMOJI[h]} {HOUR_LABELS[h]}", callback_data=f"setup:time:{h}")
+        for h in SEND_HOURS
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
 
 
 def _duration_keyboard(rid: int, back_cb: str) -> InlineKeyboardMarkup:
@@ -753,19 +755,17 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     elif action == "change_time":
-        # Show 3 time buttons; selecting one uses rem:{id}:set_time:{hour}
+        # Show time buttons; selecting one uses rem:{id}:set_time:{hour}
         current = _time_label(r)
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🌅 9:00 AM",  callback_data=f"rem:{rid}:set_time:9"),
-                InlineKeyboardButton("☀️ 12:00 PM", callback_data=f"rem:{rid}:set_time:12"),
-                InlineKeyboardButton("🌙 9:00 PM",  callback_data=f"rem:{rid}:set_time:21"),
-            ],
-            [InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")],
-        ])
+        buttons = [
+            InlineKeyboardButton(f"{HOUR_EMOJI[h]} {HOUR_LABELS[h]}", callback_data=f"rem:{rid}:set_time:{h}")
+            for h in SEND_HOURS
+        ]
+        rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+        rows.append([InlineKeyboardButton("← Back", callback_data=f"rem:{rid}:view")])
         await query.edit_message_text(
             f"Current time: {current} SGT\n\nChoose a new send time:",
-            reply_markup=keyboard,
+            reply_markup=InlineKeyboardMarkup(rows),
         )
 
     elif action.startswith("set_time:"):
