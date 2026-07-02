@@ -26,6 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# httpx logs the full request URL at INFO, and Telegram's API embeds the bot
+# token in that URL (.../bot<TOKEN>/getUpdates) — so INFO-level httpx logs
+# leak the token into Railway's log history. WARNING still surfaces errors.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 SGT = ZoneInfo("Asia/Singapore")
 DATA_FILE = os.environ.get("DATA_FILE", "/data/reminders.json")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
