@@ -239,6 +239,10 @@ check("10. first-Monday fires once per month",
       len(fired) == 3, f"{len(fired)}: {[d.isoformat() for d, *_ in fired]}")
 check("10b. all are Mondays in days 1-7",
       all(d.weekday() == 0 and d.day <= 7 for d, *_ in fired))
+check("10e. monthly_weekday gets exactly one FINAL message",
+      sum("final reminder" in t for *_, t in fired) == 1)
+check("10f. FINAL is on the last (3rd) send, and reminder is auto-paused after",
+      "final reminder" in fired[-1][3] and _STORE["201"]["reminders"][0]["paused"] is True)
 
 # 10c. last Friday of the month
 _STORE.clear(); _SENT.clear()

@@ -347,6 +347,12 @@ def _reminder_list_keyboard(chat_id: int):
     return InlineKeyboardMarkup(buttons), "Select a reminder to edit:"
 
 
+def _duration_question(chat_data: dict) -> str:
+    if chat_data.get("pending_type", "monthly_date") == "monthly_date":
+        return "How many months should this reminder run?"
+    return "How long should this reminder run?"
+
+
 def _months_keyboard(back_cb: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(str(m), callback_data=f"setup:months:{m}") for m in range(r, r + 3)]
@@ -359,8 +365,8 @@ def _months_keyboard(back_cb: str) -> InlineKeyboardMarkup:
 
 def _kind_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📆 Specific date(s) of the month", callback_data="setup:kind:date")],
-        [InlineKeyboardButton("📅 Day of the week", callback_data="setup:kind:day")],
+        [InlineKeyboardButton("📆 Specific date(s) in a month", callback_data="setup:kind:date")],
+        [InlineKeyboardButton("📅 Specific Day (e.g. Mondays)", callback_data="setup:kind:day")],
         [InlineKeyboardButton("← Back", callback_data=CB_BACK_MENU)],
     ])
 
@@ -540,7 +546,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data["pending_type"] = "monthly_weekday"
         context.chat_data.pop(AWAIT, None)
         await query.edit_message_text(
-            "Which occurrence in the month?",
+            "Which x-th week of the month?",
             reply_markup=_ordinal_keyboard("setup:ord", "setup:kind:day"),
         )
 
@@ -632,7 +638,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         hour = context.chat_data.get("pending_hour", 12)
         await query.edit_message_text(
             f"Schedule: {label} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How long should this reminder run?",
+            f"{_duration_question(context.chat_data)}",
             reply_markup=_months_keyboard("setup:back_time"),
         )
 
@@ -642,7 +648,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         label = _schedule_label(_pending_reminder(context.chat_data))
         await query.edit_message_text(
             f"Schedule: {label} at {HOUR_LABELS[hour]} SGT\n\n"
-            "How long should this reminder run?",
+            f"{_duration_question(context.chat_data)}",
             reply_markup=_months_keyboard("setup:back_time"),
         )
 
@@ -709,7 +715,7 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         elif t == "monthly_weekday":
             await query.edit_message_text(
-                f"Current schedule: {_schedule_label(r)}\n\nPick the occurrence in the month:",
+                f"Current schedule: {_schedule_label(r)}\n\nWhich x-th week of the month?",
                 reply_markup=_ordinal_keyboard(f"rem:{rid}:set_ord", f"rem:{rid}:view"),
             )
         elif t == "quarterly":
