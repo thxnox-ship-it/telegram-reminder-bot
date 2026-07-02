@@ -501,7 +501,7 @@ async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     context.chat_data.pop(AWAIT, None)
     context.chat_data.pop("editing_id", None)
     await update.message.reply_text(
-        "What would you like to do?",
+        "Greetings, fellow wise friend. What would you like me to recollect on your behalf?",
         reply_markup=_menu_keyboard(update.effective_chat.id),
     )
 
@@ -610,7 +610,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data.pop(AWAIT, None)
         context.chat_data.pop("editing_id", None)
         await query.edit_message_text(
-            "What would you like to do?",
+            "Greetings, fellow wise friend. What would you like me to recollect on your behalf?",
             reply_markup=_menu_keyboard(chat_id),
         )
 
@@ -618,7 +618,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data["pending_type"] = "monthly_date"
         context.chat_data[AWAIT] = AWAIT_DAYS_NEW
         await query.edit_message_text(
-            "Which days of the month should I send reminders?\n"
+            "Which numerical day of the month should i send reminders?\n"
             "Reply with day numbers separated by spaces — e.g. 1 15 28",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("← Back", callback_data="setup:back_kind")]]
