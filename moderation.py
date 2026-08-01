@@ -194,12 +194,34 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
     await _check_and_act(context, update.effective_chat.id, cm.new_chat_member.user)
 
 
+_logged_unmoderated_chats = set()
+
+
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fallback path: covers members who joined before the bot could see
     chat_member updates for them (e.g. the bot was just added as admin)."""
     moderated = _moderated_chat_ids()
     chat = update.effective_chat
-    if not moderated or not chat or chat.id not in moderated or not update.effective_user:
+    if not chat:
+        return
+
+    # Discovery aid: forwarding is often disabled in these discussion groups
+    # (blocking the usual "forward to @userinfobot" trick), so log any new
+    # group's ID here — once, per process — to make it easy to find.
+    if (
+        chat.type in ("group", "supergroup")
+        and chat.id not in moderated
+        and chat.id not in _logged_unmoderated_chats
+    ):
+        _logged_unmoderated_chats.add(chat.id)
+        logger.info(
+            "Saw a message in an unmoderated group — chat_id=%s title=%r. "
+            "Add this ID to MODERATION_CHAT_IDS to enable moderation here.",
+            chat.id,
+            chat.title,
+        )
+
+    if not moderated or chat.id not in moderated or not update.effective_user:
         return
 
     message_id = update.message.message_id if update.message else None
