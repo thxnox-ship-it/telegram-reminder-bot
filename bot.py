@@ -14,11 +14,14 @@ from telegram import (
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
+
+import moderation
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -1124,6 +1127,15 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(reminder_callback, pattern=r"^rem:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply))
 
+    # Comment-section moderation (avatar/bio NSFW ban) — runs in its own
+    # handler group so it doesn't interfere with the reminder-setup flow
+    # above; it only acts on chats listed in MODERATION_CHAT_IDS.
+    app.add_handler(
+        ChatMemberHandler(moderation.on_chat_member_update, ChatMemberHandler.CHAT_MEMBER),
+        group=-1,
+    )
+    app.add_handler(MessageHandler(filters.ALL, moderation.on_group_message), group=-1)
+
     for hour in SEND_HOURS:
         app.job_queue.run_daily(
             send_reminders,
@@ -1141,7 +1153,9 @@ def main() -> None:
             "DATA_FILE=%s may be ephemeral — set it to a mounted volume path "
             "so reminders survive restarts/redeploys.", DATA_FILE
         )
-    app.run_polling(drop_pending_updates=True)
+    # chat_member isn't in Telegram's default update set — request it
+    # explicitly so the moderation handler sees group join events.
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

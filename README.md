@@ -31,6 +31,27 @@ In a group, only admins can create or change reminders. In a 1:1 chat, anyone ca
 | `BOT_TOKEN` | yes      | —                       | From [@BotFather](https://t.me/BotFather).         |
 | `DATA_FILE` | no       | `/data/reminders.json`  | Where reminders are stored. **Must be on a persistent volume** (see below). |
 
+### Comment-section moderation
+
+Bans a member the moment their profile photo or bio trips an NSFW check —
+built for the linked discussion groups behind channel posts, where spam bots
+join and drop an emoji comment with an explicit avatar. See `moderation.py`.
+
+| Var                      | Required                | Default      | Notes |
+|---------------------------|--------------------------|--------------|-------|
+| `MODERATION_CHAT_IDS`      | to enable                | — (disabled) | Comma-separated numeric chat IDs of the discussion groups to moderate (not the channel IDs). Find one by forwarding a message from the group to @userinfobot. |
+| `SIGHTENGINE_API_USER`     | to enable avatar check    | —            | From a free [Sightengine](https://sightengine.com) account. |
+| `SIGHTENGINE_API_SECRET`   | to enable avatar check    | —            | Same account as above. |
+| `NSFW_THRESHOLD`           | no                        | `0.6`        | Risk score (0-1) at or above which an avatar bans the user. |
+
+Either the avatar check or the bio check (a static NSFW keyword list, no API
+needed) triggers an immediate ban, message delete, and a short notice posted
+in the chat. Each (chat, user) pair is only checked once, ever — the result
+is cached in the same JSON store as reminders (no separate database).
+
+**The bot must be an admin with ban rights in each moderated group.** Without
+`MODERATION_CHAT_IDS` set, this feature is a no-op.
+
 ## ⚠️ Persistence — attach a volume on Railway
 
 Reminders are stored as JSON at `DATA_FILE`. Railway's container filesystem is
