@@ -1,11 +1,16 @@
 """Comment-section moderation for the linked discussion groups behind
 daywasg / handfulofleaves.
 
-Two independent hard gates, either one bans immediately (no message-content
-or account-age gating — both signals are direct evidence, not heuristics):
+Independent hard gates, any one bans immediately (no message-content or
+account-age gating — these are direct evidence, not heuristics):
 
-  - avatar: profile photo trips Sightengine's nudity-2.1 model
+  - avatar: the user's own profile photo trips Sightengine's nudity-2.1 model
   - bio: profile bio text contains an NSFW keyword/site name
+  - personal channel: Telegram lets a profile pin a "personal channel" card
+    (shown in the contact-info popup) — its title/description and photo get
+    the same two checks. A spam account can have a blank placeholder avatar
+    (so the avatar check alone sees nothing) while its pinned channel card
+    is the actual ad.
 
 On a ban: the user is banned, their triggering message (if any) is deleted,
 and a short notice is posted in the chat. Each (chat, user) pair is only
@@ -72,22 +77,17 @@ def _bio_is_nsfw(bio) -> bool:
     return any(keyword in lower for keyword in NSFW_BIO_KEYWORDS)
 
 
-async def _avatar_is_nsfw(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+async def _photo_file_id_is_nsfw(context: ContextTypes.DEFAULT_TYPE, file_id: str, label: str) -> bool:
     api_user = os.environ.get("SIGHTENGINE_API_USER")
     api_secret = os.environ.get("SIGHTENGINE_API_SECRET")
     if not api_user or not api_secret:
-        logger.warning("SIGHTENGINE_API_USER/SECRET not set — skipping avatar check for %s", user_id)
+        logger.warning("SIGHTENGINE_API_USER/SECRET not set — skipping %s check", label)
         return False
 
     threshold = float(os.environ.get("NSFW_THRESHOLD", "0.6"))
 
     try:
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count == 0:
-            return False
-
-        largest = photos.photos[0][-1]
-        file = await context.bot.get_file(largest.file_id)
+        file = await context.bot.get_file(file_id)
         # PTB's get_file() already rewrites file_path into a full
         # https://api.telegram.org/file/bot<token>/... URL.
         image_url = file.file_path
@@ -110,8 +110,41 @@ async def _avatar_is_nsfw(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> b
         return risk_score >= threshold
     except Exception:
         # Fail open: an API outage shouldn't ban legitimate members.
-        logger.exception("Avatar NSFW check failed for user %s", user_id)
+        logger.exception("NSFW check failed for %s", label)
         return False
+
+
+async def _avatar_is_nsfw(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+    except Exception:
+        logger.exception("Failed to fetch profile photos for user %s", user_id)
+        return False
+    if photos.total_count == 0:
+        return False
+    largest = photos.photos[0][-1]
+    return await _photo_file_id_is_nsfw(context, largest.file_id, f"avatar of user {user_id}")
+
+
+async def _personal_channel_is_nsfw(context: ContextTypes.DEFAULT_TYPE, personal_chat) -> bool:
+    """Telegram lets a profile pin a "personal channel" card (shown in the
+    contact-info popup) — check its title/description text and its photo,
+    the same two ways we check the user's own profile."""
+    try:
+        channel = await context.bot.get_chat(personal_chat.id)
+    except Exception:
+        logger.exception("Failed to fetch personal channel %s", personal_chat.id)
+        return False
+
+    text = " ".join(filter(None, [channel.title, getattr(channel, "description", None)]))
+    if _bio_is_nsfw(text):
+        return True
+
+    if channel.photo:
+        return await _photo_file_id_is_nsfw(
+            context, channel.photo.big_file_id, f"personal channel {channel.id} photo"
+        )
+    return False
 
 
 def _get_checked(chat_id: int, user_id: int):
@@ -144,18 +177,24 @@ async def _check_and_act(
     avatar_flagged = await _avatar_is_nsfw(context, user.id)
 
     bio_flagged = False
+    channel_flagged = False
     try:
         chat_full = await context.bot.get_chat(user.id)
         bio_flagged = _bio_is_nsfw(getattr(chat_full, "bio", None))
+        personal_chat = getattr(chat_full, "personal_chat", None)
+        if personal_chat is not None:
+            channel_flagged = await _personal_channel_is_nsfw(context, personal_chat)
     except Exception:
-        logger.exception("Bio check failed for user %s", user.id)
+        logger.exception("Profile check failed for user %s", user.id)
 
-    flagged = avatar_flagged or bio_flagged
+    flagged = avatar_flagged or bio_flagged or channel_flagged
     reasons = []
     if avatar_flagged:
         reasons.append("avatar")
     if bio_flagged:
         reasons.append("bio")
+    if channel_flagged:
+        reasons.append("personal_channel")
     reason = ",".join(reasons) if reasons else None
 
     if flagged:
