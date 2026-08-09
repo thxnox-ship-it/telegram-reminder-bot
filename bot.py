@@ -502,10 +502,12 @@ async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     context.chat_data.pop(AWAIT, None)
     context.chat_data.pop("editing_id", None)
-    await update.message.reply_text(
+    _track_setup_message(context, update.message.message_id)
+    sent = await update.message.reply_text(
         "Greetings, fellow wise friend. What would you like me to recollect on your behalf?",
         reply_markup=_menu_keyboard(update.effective_chat.id),
     )
+    _track_setup_message(context, sent.message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +856,22 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # Text reply handler
 # ---------------------------------------------------------------------------
 
+def _track_setup_message(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
+    context.chat_data.setdefault("setup_message_ids", []).append(message_id)
+
+
+async def _cleanup_setup_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Deletes every tracked message from the just-finished /setup flow. The
+    bot's own messages are always deletable; the user's typed replies only if
+    the bot has delete rights in this chat (a group admin) — in a private
+    chat Telegram never allows that, so those are silently left in place."""
+    for message_id in context.chat_data.pop("setup_message_ids", []):
+        try:
+            await context.bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+
 async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     awaiting = context.chat_data.get(AWAIT)
     if not awaiting:
@@ -862,43 +880,51 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = update.message.text.strip()
 
     if awaiting == AWAIT_DAYS_NEW:
+        _track_setup_message(context, update.message.message_id)
         try:
             days = sorted({int(d) for d in text.split()})
             if not days or not all(1 <= d <= 31 for d in days):
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Please send valid day numbers between 1 and 31.")
+            sent = await update.message.reply_text("Please send valid day numbers between 1 and 31.")
+            _track_setup_message(context, sent.message_id)
             return
         context.chat_data["pending_days"] = days
         context.chat_data.pop(AWAIT, None)
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             f"Days noted: {', '.join(str(d) for d in days)}{_short_month_note(days)}"
             "\n\nWhat time should I send the reminder?",
             reply_markup=_time_keyboard("setup:back_days"),
         )
+        _track_setup_message(context, sent.message_id)
 
     elif awaiting == AWAIT_START_NEW:
+        _track_setup_message(context, update.message.message_id)
         start = _parse_date(text)
         if start is None:
-            await update.message.reply_text(
+            sent = await update.message.reply_text(
                 "I couldn't read that date. Try a format like 15 Aug 2026 or 2026-08-15."
             )
+            _track_setup_message(context, sent.message_id)
             return
         if start < datetime.now(SGT).date():
-            await update.message.reply_text(
+            sent = await update.message.reply_text(
                 "That date is in the past — please pick today or a later date."
             )
+            _track_setup_message(context, sent.message_id)
             return
         context.chat_data["pending_start_date"] = start.isoformat()
         context.chat_data.pop(AWAIT, None)
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             f"Start date noted: {start.strftime('%d %b %Y')}, repeating every 3 months."
             f"{_short_month_note([start.day])}"
             "\n\nWhat time should I send the reminder?",
             reply_markup=_time_keyboard("setup:back_qdate"),
         )
+        _track_setup_message(context, sent.message_id)
 
     elif awaiting == AWAIT_MSG_NEW:
+        _track_setup_message(context, update.message.message_id)
         rtype = context.chat_data.get("pending_type", "monthly_date")
         hour = context.chat_data.get("pending_hour", 12)
         end_date_iso = context.chat_data.get("pending_end_date")
@@ -923,6 +949,7 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if end_date_iso else "indefinitely"
         )
         label = _schedule_label({"type": rtype, **schedule})
+        await _cleanup_setup_messages(context, chat_id)
         await update.message.reply_text(
             f"Reminder added! {label} at {HOUR_LABELS[hour]} SGT, {end_str}.\n\n"
             f"Message:\n{REMINDER_HEADER}\n{text}",
